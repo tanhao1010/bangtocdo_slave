@@ -20,7 +20,7 @@
 // ===================== OTA =====================
 const char* WIFI_SSID     = "ATProSoft";
 const char* WIFI_PASSWORD = "ATPro1234560";
-const int FIRMWARE_VERSION = 13;
+const int FIRMWARE_VERSION = 15;
 
 // URL OTA tu dong khop voi build env (slave1 / slave2) qua MODBUS_SLAVE_ID.
 #define _STR(x) #x
@@ -339,12 +339,24 @@ void loop() {
       }
     }
     else if (sig == SIG_FINAL) {
-      uint32_t s = mb.Hreg(HR_SEC);
-      uint32_t m = mb.Hreg(HR_MS);
-      tElapsed_us = ((int64_t)s * 1000 + m) * 1000;
-      slaveState = ST_STOPPED;
-      stateChanged = true;
-      invalidateDisplay = true;
+      // Mode 2: slave tu dung khi kich, KHONG dung khi nhan SIG_FINAL.
+      // Master chi gui SIG_FINAL de cap nhat so hien thi cho slave chua dung.
+      if (mode == 2 && slaveState == ST_RUNNING) {
+        // Slave dang chay -> chi cap nhat hien thi, KHONG chuyen state.
+        uint32_t s = mb.Hreg(HR_SEC);
+        uint32_t m = mb.Hreg(HR_MS);
+        tElapsed_us = ((int64_t)s * 1000 + m) * 1000;
+        stateChanged = true;
+        invalidateDisplay = true;
+      } else {
+        // Mode khac (1/3/4/5) hoac slave da STOPPED -> dung binh thuong.
+        uint32_t s = mb.Hreg(HR_SEC);
+        uint32_t m = mb.Hreg(HR_MS);
+        tElapsed_us = ((int64_t)s * 1000 + m) * 1000;
+        slaveState = ST_STOPPED;
+        stateChanged = true;
+        invalidateDisplay = true;
+      }
     }
   }
 
@@ -426,13 +438,8 @@ void loop() {
 
     if (slaveState == ST_RUNNING) {
       if (mode == 1 || mode == 2) {
+        // Mode 1/2: chi hieu ung hinh vuong, KHONG hien so (dem ngam).
         runSquareEffect(colorRdy);
-        // Mode 1: chi hieu ung, ko hien so (master dem).
-        // Mode 2: hien so dem cua slave.
-        if (mode == 2) {
-          int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
-          displayTime((unsigned long)(cur / 1000), colorRdy);
-        }
       } else if (mode == 3) {
         int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
         int64_t remain = tTarget_us - cur;
@@ -482,6 +489,7 @@ void loop() {
 }
 
 void updateStateReg() {
+  uint16_t mode = mb.Hreg(HR_MODE);
   uint16_t st = 0;
   switch (slaveState) {
     case ST_RUNNING: st = 100; break;
@@ -490,6 +498,14 @@ void updateStateReg() {
     default:         st = 0;   break;
   }
   mb.Hreg(HR_COUNT_STATE, st);
+
+  // Mode 2: slave dem -> ghi SEC/MS lien tuc de master doc realtime.
+  if (mode == 2 && slaveState == ST_RUNNING) {
+    int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
+    uint32_t elapsed_ms = (uint32_t)(cur / 1000);
+    mb.Hreg(HR_SEC, (uint16_t)(elapsed_ms / 1000));
+    mb.Hreg(HR_MS, (uint16_t)(elapsed_ms % 1000));
+  }
 }
 
 // ===================== HIEU UNG VE HINH VUONG =====================

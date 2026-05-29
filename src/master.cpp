@@ -584,11 +584,13 @@ void loop() {
   server.handleClient();
   pollSerial();
 
-  // Mode 1 dang dua: poll het toc do.
-  bool mode1Race = (currentMode == 1 && (mState == M_ARMED || mState == M_RUNNING));
+  // Mode 1 hoac 2 dang dua: poll het toc do (uu tien latency).
+  bool raceMode = ((currentMode == 1 || currentMode == 2) &&
+                   (mState == M_ARMED || mState == M_RUNNING));
 
-  if (mode1Race) {
-    tickMode1();
+  if (raceMode) {
+    if (currentMode == 1) tickMode1();
+    else                  tickMode2();
   } else if (millis() - lastTickMs > 100) {
     lastTickMs = millis();
     switch (currentMode) {
@@ -600,8 +602,16 @@ void loop() {
     }
   }
 
-  // Cache poll (skip khi mode 1 dang dua - master tu cap nhat masterMs).
-  if (!mode1Race) {
+  // Cache poll: mode 1 skip (master tu dem), mode 2 can poll slave lien tuc.
+  if (currentMode == 2 && mState == M_RUNNING) {
+    // Mode 2 dang dua: poll slave moi 150ms de web cap nhat realtime.
+    static uint32_t lastCache2 = 0;
+    if (millis() - lastCache2 > 150) {
+      lastCache2 = millis();
+      pollStatusCache();
+    }
+  } else if (currentMode != 1 || mState == M_IDLE || mState == M_FINISHED) {
+    // Mode khac hoac idle: poll cham.
     static uint32_t lastCache = 0;
     uint32_t cacheInt = (mState == M_RUNNING || mState == M_PAUSED) ? 250 : 800;
     if (millis() - lastCache > cacheInt) {
