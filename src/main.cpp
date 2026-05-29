@@ -1,6 +1,13 @@
+// ============================================================
+//  SLAVE  (Bang LED P5 64x32)
+//  - Giao tiep voi MASTER qua LoRa E32 (UART0 mac dinh: TX/RX)
+//  - Modbus RTU slave, ID = 1 hoac 2 (set qua build_flag)
+//  - 5 mode: dau don / dau doi / dem nguoc / dem toi / tang thu cong
+//  - Chi 2 mau: XANH (id=1) va DO (id=2)
+// ============================================================
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 
@@ -10,23 +17,22 @@
 #include <ModbusRTU.h>
 #include <esp_timer.h>
 
-// ===================== CAU HINH OTA =====================
-// 1) WiFi
+// ===================== OTA =====================
 const char* WIFI_SSID     = "ATProSoft";
 const char* WIFI_PASSWORD = "ATPro1234560";
+const int FIRMWARE_VERSION = 12;
 
-// 2) Version firmware hien tai dang chay tren ESP32.
-//    Moi lan build firmware moi -> tang so nay len (vd 5 -> 6)
-const int FIRMWARE_VERSION = 6;
+// URL OTA tu dong khop voi build env (slave1 / slave2) qua MODBUS_SLAVE_ID.
+#define _STR(x) #x
+#define STR(x) _STR(x)
+#define SLAVE_TAG "slave" STR(MODBUS_SLAVE_ID)
 
-// 3) URL raw tren GitHub
 const char* VERSION_URL  =
-  "https://raw.githubusercontent.com/tanhao1010/bangtocdo_slave/main/version.txt";
+  "http://192.168.1.52:8000/" SLAVE_TAG "/version.txt";
 const char* FIRMWARE_URL =
-  "https://raw.githubusercontent.com/tanhao1010/bangtocdo_slave/main/.pio/build/esp32doit-devkit-v1/firmware.bin";
-// ========================================================
+  "http://192.168.1.52:8000/.pio/build/" SLAVE_TAG "/firmware.bin";
 
-// ===================== CAU HINH LED / MODBUS =====================
+// ===================== HW =====================
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 32
 #define NUM_ROWS 1
@@ -34,40 +40,60 @@ const char* FIRMWARE_URL =
 
 #define BUTTON_PIN 34
 #define DEBOUNCE_US 250000
-// GPIO34-39 on ESP32 are input-only — INPUT_PULLUP is silently ignored.
-// Must use external pull-up resistor. MIN_RACE_US guards against spurious
-// triggers.
-#define MIN_RACE_US 700000LL // 700ms minimum race time before accepting stop
+// GPIO34 input-only, can ngoai tro keo len. MIN_RACE chong nhieu chan thoi gian
+// toi thieu de chap nhan trigger sau khi RUNNING.
+#define MIN_RACE_US 700000LL
 
-// Cau hinh ID Slave: Dat la 1 cho bang 1, 2 cho bang 2
-#define MODBUS_SLAVE_ID 2
+#ifndef MODBUS_SLAVE_ID
+#define MODBUS_SLAVE_ID 1
+#endif
 
+#define LORA_BAUD 115200    // E32 mac dinh 9600 8N1
+
+// ===================== MODBUS REG MAP =====================
+enum ModbusHreg {
+  HR_SLAVE_ID    = 0,
+  HR_MODE        = 1,    // 1..5
+  HR_SEC         = 2,    // giay (display / final time)
+  HR_MS          = 3,    // ms (mode 1/2)
+  HR_COUNT_STATE = 4,    // 0=IDLE 100=RUN 200=STOP 300=PAUSE
+  HR_MASTER_SIG  = 5,    // tin hieu tu master (xem MasterSig)
+  HR_COLOR_READY = 6,    // 1=xanh, 2=do
+  HR_COLOR_STOP  = 7,    // 1=xanh, 2=do
+  HR_SYNC_FLAG   = 8,    // co dong bo (du phong)
+  HR_TARGET      = 9,    // muc tieu giay (mode 3/4) hoac gia tri set (mode 5)
+  HR_TRIG_FLAG   = 10,   // 1 = slave da nhan nut, master xoa ve 0
+  HR_COUNT       = 12
+};
+
+enum MasterSig {
+  SIG_IDLE   = 0,
+  SIG_ARM    = 100,   // san sang
+  SIG_START  = 110,   // bat dau dem
+  SIG_PAUSE  = 120,
+  SIG_RESUME = 130,
+  SIG_FINAL  = 250    // chot va hien so cuoi tu HR_SEC/HR_MS
+};
+
+// ===================== STATE =====================
+enum State { ST_IDLE, ST_RUNNING, ST_STOPPED, ST_PAUSED };
+State slaveState = ST_IDLE;
+
+int64_t tStart_us    = 0;    // moc bat dau segment dang chay
+int64_t tElapsed_us  = 0;    // tong da troi qua (cong don qua cac lan pause)
+int64_t tTarget_us   = 0;    // muc tieu (mode 3/4)
+uint32_t mode5Value  = 0;    // gia tri dem thu cong
+
+bool stateChanged = false;
+bool invalidateDisplay = false;
+
+// ===================== DISPLAY =====================
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 VirtualMatrixPanel *virtualDisp = nullptr;
 uint16_t colBlack;
-
 ModbusRTU mb;
 
-enum ModbusHreg {
-  HR_SLAVE_ID = 0,
-  HR_MODE = 1,
-  HR_SEC = 2,
-  HR_MS = 3,
-  HR_COUNT_STATE = 4,
-  HR_MASTER_SIG = 5,
-  HR_COLOR_READY = 6,
-  HR_COLOR_STOP = 7,
-  HR_SYNC_FLAG = 8,
-  HR_COUNT = 10
-};
-
-enum State { IDLE, RUNNING, STOPPED };
-State timerState = IDLE;
-int64_t tStart_us = 0;
-int64_t tElapsed_us = 0;
-bool stateChanged = false;
-
-#define REFRESH_MS 10
+#define REFRESH_MS 15
 static char prevBuf[16] = "";
 static uint16_t prevColor = 0;
 static int prevFormat = -1;
@@ -78,54 +104,34 @@ static int textH = 0;
 static int textYoff = 0;
 
 void displayTime(unsigned long ms, uint16_t color);
+void displayNumber(uint32_t n, uint16_t color);
+void runSquareEffect(uint16_t color);
 void initFontMetrics();
-void updateModbusRegs();
+void clearScreen();
+void updateStateReg();
 
-uint16_t getColorFromID(int id) {
-  switch (id) {
-  case 1:
-    return 0x07E0; // Green
-  case 2:
-    return 0xF800; // Red
-  case 3:
-    return 0x001F; // Blue
-  case 4:
-    return 0xFFE0; // Yellow
-  case 5:
-    return 0x07FF; // Cyan
-  case 6:
-    return 0xF81F; // Magenta
-  case 7:
-    return 0xFFFF; // White
-  case 8:
-    return 0xFD20; // Orange
-  case 9:
-    return 0x801F; // Purple
-  case 10:
-    return 0xAFE5; // Pink/Lime
-  default:
-    return 0x07E0;
-  }
+// Chi co 2 mau: XANH (1) va DO (2)
+uint16_t getColor(int id) {
+  return (id == 2) ? 0xF800 /* RED */ : 0x07E0 /* GREEN */;
 }
 
+// ===================== ISR =====================
 volatile bool btnPressed = false;
-
 void IRAM_ATTR buttonISR() {
   int64_t now = esp_timer_get_time();
   static int64_t lastISR = 0;
-  if ((now - lastISR) < DEBOUNCE_US)
-    return;
+  if ((now - lastISR) < DEBOUNCE_US) return;
   lastISR = now;
   btnPressed = true;
 }
 
+// ===================== FONT =====================
 void initFontMetrics() {
   const GFXfont *font = &FreeSansBold12pt7b;
   digitAdv = 0;
   for (char c = '0'; c <= '9'; c++) {
     int adv = font->glyph[c - font->first].xAdvance;
-    if (adv > digitAdv)
-      digitAdv = adv;
+    if (adv > digitAdv) digitAdv = adv;
   }
   dotAdv = font->glyph['.' - font->first].xAdvance;
   int16_t x1, y1;
@@ -137,101 +143,78 @@ void initFontMetrics() {
   textYoff = y1 - 1;
 }
 
-// ===================== HAM OTA =====================
+// ===================== OTA =====================
 void connectWiFi() {
   Serial.printf("Ket noi WiFi: %s\n", WIFI_SSID);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    delay(500);
-    Serial.print(".");
+    delay(500); Serial.print(".");
   }
   Serial.println();
-
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Da ket noi. IP: ");
-    Serial.println(WiFi.localIP());
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
   } else {
-    Serial.println("Khong ket noi duoc WiFi.");
+    Serial.println("Khong noi duoc WiFi.");
   }
 }
 
-// Lay so version moi nhat tu version.txt tren GitHub
 int getRemoteVersion() {
-  WiFiClientSecure client;
-  client.setInsecure();           // bo qua kiem tra chung chi (don gian)
-  client.setTimeout(15);          // timeout doc du lieu: 15 giay
-
+  WiFiClient client;
   HTTPClient http;
-  http.setConnectTimeout(15000);  // timeout ket noi: 15 giay
-  http.setTimeout(15000);         // timeout tong: 15 giay
+  http.setConnectTimeout(4000);   // ngan lai de khong treo lau khi server tat
+  http.setTimeout(4000);
   http.setReuse(false);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-
+  Serial.printf("GET %s\n", VERSION_URL);
   if (!http.begin(client, VERSION_URL)) {
-    Serial.println("Khong mo duoc VERSION_URL");
+    Serial.println("http.begin() that bai");
     return -1;
   }
-  http.addHeader("User-Agent", "ESP32");
-
   int code = http.GET();
   int remote = -1;
   if (code == HTTP_CODE_OK) {
     remote = http.getString().toInt();
     Serial.printf("Version tren server: %d\n", remote);
   } else {
-    Serial.printf("Loi tai version.txt, HTTP code: %d\n", code);
+    Serial.printf("Loi GET, HTTP code: %d\n", code);
   }
   http.end();
   return remote;
 }
 
 void doUpdate() {
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(30);
-
   Serial.println("Bat dau tai firmware moi...");
-
-  // Timeout 30s (mac dinh 8s -> tai file lon bi read Timeout).
+  WiFiClient client;
   HTTPUpdate updater(30000);
   updater.rebootOnUpdate(true);
-  updater.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-
   updater.onProgress([](int cur, int total) {
-    Serial.printf("Tai: %d / %d bytes (%d%%)\r",
-                  cur, total, total ? (cur * 100 / total) : 0);
+    Serial.printf("Tai: %d / %d (%d%%)\r", cur, total, total ? cur * 100 / total : 0);
   });
-
   t_httpUpdate_return ret = updater.update(client, FIRMWARE_URL);
   Serial.println();
-
   switch (ret) {
     case HTTP_UPDATE_FAILED:
-      Serial.printf("Update that bai (%d): %s\n",
+      Serial.printf("Update fail (%d): %s\n",
                     updater.getLastError(),
                     updater.getLastErrorString().c_str());
       break;
-    case HTTP_UPDATE_NO_UPDATES:
-      Serial.println("Khong co update.");
-      break;
-    case HTTP_UPDATE_OK:
-      Serial.println("Update OK!");
-      break;
+    case HTTP_UPDATE_NO_UPDATES: Serial.println("Khong co update."); break;
+    case HTTP_UPDATE_OK:         Serial.println("Update OK!"); break;
   }
 }
 
 void checkForUpdate() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi chua noi -> bo qua OTA.");
+    return;
+  }
   int remote = getRemoteVersion();
-  if (remote < 0) return;
-
-  Serial.printf("Version hien tai: %d | Version server: %d\n",
-                FIRMWARE_VERSION, remote);
-
+  if (remote < 0) {
+    Serial.println("Bo qua OTA (khong lay duoc version).");
+    return;
+  }
+  Serial.printf("Local FW=%d, Server FW=%d\n", FIRMWARE_VERSION, remote);
   if (remote > FIRMWARE_VERSION) {
     Serial.println("Co ban moi -> cap nhat.");
     doUpdate();
@@ -240,185 +223,249 @@ void checkForUpdate() {
   }
 }
 
+// ===================== SETUP =====================
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.printf("\n=== Khoi dong. Firmware version: %d ===\n", FIRMWARE_VERSION);
+  Serial.printf("\n=== SLAVE %d  FW %d ===\n", MODBUS_SLAVE_ID, FIRMWARE_VERSION);
 
-  // --- 1) OTA: kiem tra & cap nhat luc boot ---
   connectWiFi();
   checkForUpdate();
-
-  // Tat WiFi sau khi check OTA: tranh sóng WiFi gay nhieu / jitter cho
-  // man hinh LED DMA (rat nhay ve dinh thoi) va giai phong CPU.
+  Serial.println("Tat WiFi, khoi tao LED + Modbus...");
+  Serial.flush();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
-  // --- 2) Khoi tao dieu khien LED P5 + Modbus ---
-  // Luu y: Modbus RTU dung chung UART0 voi USB. Sau lenh nay, KHONG in
-  // debug ra Serial nua (se lam hong khung Modbus).
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
 
+  // CHU Y: tu day Serial chuyen sang LORA_BAUD cho Modbus.
+  // Neu muon thay monitor de debug, doi monitor sang LORA_BAUD = 115200.
+  Serial.flush();
+  Serial.updateBaudRate(LORA_BAUD);
   mb.begin(&Serial);
   mb.slave(MODBUS_SLAVE_ID);
 
-  for (uint16_t i = 0; i < HR_COUNT; i++) {
-    mb.addHreg(i, 0);
-  }
+  for (uint16_t i = 0; i < HR_COUNT; i++) mb.addHreg(i, 0);
   mb.Hreg(HR_SLAVE_ID, MODBUS_SLAVE_ID);
-  mb.Hreg(HR_COLOR_READY, 1);
-  mb.Hreg(HR_COLOR_STOP, 2);
+  mb.Hreg(HR_COLOR_READY, 1);    // xanh
+  mb.Hreg(HR_COLOR_STOP, 2);     // do
   mb.Hreg(HR_MODE, 1);
 
   HUB75_I2S_CFG mxconfig(PANEL_RES_X * 2, PANEL_RES_Y / 2, NUM_ROWS * NUM_COLS);
   mxconfig.clkphase = false;
   mxconfig.driver = HUB75_I2S_CFG::ICN2038S;
-
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   dma_display->setBrightness8(200);
   dma_display->begin();
-  delay(500);
-
+  delay(300);
   virtualDisp = new VirtualMatrixPanel(*dma_display, NUM_ROWS, NUM_COLS,
                                        PANEL_RES_X, PANEL_RES_Y);
   virtualDisp->setPhysicalPanelScanRate(FOUR_SCAN_32PX_HIGH);
-
   colBlack = virtualDisp->color565(0, 0, 0);
   initFontMetrics();
   virtualDisp->fillScreen(colBlack);
-  displayTime(0, getColorFromID(mb.Hreg(HR_COLOR_READY)));
+  displayTime(0, getColor(mb.Hreg(HR_COLOR_READY)));
 }
 
+// ===================== LOOP =====================
 uint32_t lastDisplayMs = 0;
-uint32_t lastRegUpdateMs = 0;
 
 void loop() {
   mb.task();
 
-  uint16_t masterSig = mb.Hreg(HR_MASTER_SIG);
-  uint16_t currentMode = mb.Hreg(HR_MODE);
-  static uint16_t lastMasterSig = 999;
-  static uint16_t lastHregSec = 999;
-  static uint16_t lastHregMs = 999;
+  uint16_t mode      = mb.Hreg(HR_MODE);
+  uint16_t sig       = mb.Hreg(HR_MASTER_SIG);
+  uint16_t target    = mb.Hreg(HR_TARGET);
+  uint16_t colorRdy  = getColor(mb.Hreg(HR_COLOR_READY));
+  uint16_t colorStop = getColor(mb.Hreg(HR_COLOR_STOP));
 
-  if (masterSig != lastMasterSig) {
-    lastMasterSig = masterSig;
+  static uint16_t lastSig    = 0xFFFF;
+  static uint16_t lastMode   = 0xFFFF;
+  static uint16_t lastTarget = 0xFFFF;
 
-    if ((masterSig == 0 || masterSig == 100) &&
-        (timerState != IDLE || tElapsed_us != 0)) {
-      tElapsed_us = 0;
-      timerState = IDLE;
-      stateChanged = true;
-      lastHregSec = 999;
-      lastHregMs = 999;
-      updateModbusRegs();
-    } else if (masterSig == 150 && timerState != RUNNING) {
-      tElapsed_us = 0;
-      tStart_us = esp_timer_get_time();
-      timerState = RUNNING;
-      stateChanged = true;
-      lastHregSec = 999;
-      lastHregMs = 999;
-      updateModbusRegs();
-    } else if (masterSig == 155 && lastMasterSig != 155) {
-      tElapsed_us = 0;
-      tStart_us = esp_timer_get_time();
-      timerState = RUNNING;
-      stateChanged = true;
-      lastHregSec = 999;
-      lastHregMs = 999;
-      updateModbusRegs();
-    } else if (masterSig == 250) {
-      // Blank screen immediately for fast visual feedback
-      virtualDisp->fillScreen(colBlack);
-      prevFormat = -1; // force full redraw on next displayTime()
-      prevBuf[0] = '\0';
+  // ---------- Doi MODE -> reset ----------
+  if (mode != lastMode) {
+    lastMode = mode;
+    slaveState = ST_IDLE;
+    tElapsed_us = 0;
+    mode5Value = 0;
+    stateChanged = true;
+    invalidateDisplay = true;
+  }
 
-      // Lấy thời gian chính thức từ master (đã được ghi trước sig=250)
-      uint32_t final_sec = mb.Hreg(HR_SEC);
-      uint32_t final_ms = mb.Hreg(HR_MS);
-      tElapsed_us = ((int64_t)final_sec * 1000 + final_ms) * 1000;
-      timerState = STOPPED;
+  // ---------- Xu ly tin hieu MASTER ----------
+  if (sig != lastSig) {
+    lastSig = sig;
+    int64_t now = esp_timer_get_time();
+
+    if (sig == SIG_IDLE) {
+      slaveState = ST_IDLE;
+      tElapsed_us = 0;
+      if (mode == 5) mode5Value = 0;
       stateChanged = true;
-      updateModbusRegs();
+      invalidateDisplay = true;
+    }
+    else if (sig == SIG_ARM) {
+      slaveState = ST_IDLE;
+      tElapsed_us = 0;
+      stateChanged = true;
+      invalidateDisplay = true;
+    }
+    else if (sig == SIG_START) {
+      if (mode == 3 || mode == 4) {
+        tTarget_us = (int64_t)target * 1000000LL;
+      }
+      tElapsed_us = 0;
+      tStart_us = now;
+      slaveState = ST_RUNNING;
+      stateChanged = true;
+      invalidateDisplay = true;
+    }
+    else if (sig == SIG_PAUSE) {
+      if (slaveState == ST_RUNNING) {
+        tElapsed_us += (now - tStart_us);
+        slaveState = ST_PAUSED;
+        stateChanged = true;
+      }
+    }
+    else if (sig == SIG_RESUME) {
+      if (slaveState == ST_PAUSED) {
+        tStart_us = now;
+        slaveState = ST_RUNNING;
+        stateChanged = true;
+      }
+    }
+    else if (sig == SIG_FINAL) {
+      uint32_t s = mb.Hreg(HR_SEC);
+      uint32_t m = mb.Hreg(HR_MS);
+      tElapsed_us = ((int64_t)s * 1000 + m) * 1000;
+      slaveState = ST_STOPPED;
+      stateChanged = true;
+      invalidateDisplay = true;
     }
   }
 
-  if (timerState == STOPPED) {
-    uint16_t hregSec = mb.Hreg(HR_SEC);
-    uint16_t hregMs = mb.Hreg(HR_MS);
-    if (hregSec != lastHregSec || hregMs != lastHregMs) {
-      lastHregSec = hregSec;
-      lastHregMs = hregMs;
-      tElapsed_us = ((int64_t)hregSec * 1000 + hregMs) * 1000;
-      stateChanged = true;
-    }
+  // ---------- Mode 5: master ghi HR_TARGET de set so ----------
+  if (mode == 5 && target != lastTarget) {
+    lastTarget = target;
+    mode5Value = (target > 9999) ? 9999 : target;
+    stateChanged = true;
   }
+  if (mode != 5) lastTarget = target; // tranh trigger nham khi quay lai mode 5
 
+  // ---------- Nut bam ----------
   if (btnPressed) {
     btnPressed = false;
     int64_t now = esp_timer_get_time();
 
-    if (currentMode == 1) {
-      if (MODBUS_SLAVE_ID == 1) {
-        if (timerState == IDLE && masterSig == 100) {
-          tElapsed_us = 0;
-          tStart_us = now;
-          timerState = RUNNING;
-          stateChanged = true;
-          lastHregSec = 999;
-          lastHregMs = 999;
-          updateModbusRegs();
-        }
-      } else if (MODBUS_SLAVE_ID == 2) {
-        // Guard: ignore trigger within MIN_RACE_US of start (spurious /
-        // floating pin)
-        if (timerState == RUNNING && (now - tStart_us) >= MIN_RACE_US) {
-          tElapsed_us = now - tStart_us;
-          timerState = STOPPED;
-          stateChanged = true;
-          updateModbusRegs();
-        }
+    if (mode == 1) {
+      // Mode 1 = dau don. Slave 1 = cong START, slave 2 = cong FINISH.
+      // Master da gui SIG_START tu dau -> ca 2 slave dang ST_RUNNING hieu ung.
+      if (MODBUS_SLAVE_ID == 1 && slaveState == ST_RUNNING) {
+        // Slave 1: bao master "co nguoi cat qua cong start" - khong can guard.
+        mb.Hreg(HR_TRIG_FLAG, 1);
+      } else if (MODBUS_SLAVE_ID == 2 && slaveState == ST_RUNNING
+                 && (now - tStart_us) >= MIN_RACE_US) {
+        mb.Hreg(HR_TRIG_FLAG, 1);
       }
-    } else if (currentMode == 2) {
-      // Guard: same minimum time before accepting stop
-      if (timerState == RUNNING && (now - tStart_us) >= MIN_RACE_US) {
+    }
+    else if (mode == 2) {
+      // Mode 2 = ai bam truoc thang. Tu dung dem, ghi thoi gian, bao master.
+      if (slaveState == ST_RUNNING && (now - tStart_us) >= MIN_RACE_US) {
         tElapsed_us = now - tStart_us;
-        timerState = STOPPED;
+        slaveState = ST_STOPPED;
         stateChanged = true;
-        mb.Hreg(HR_SEC, (uint16_t)(tElapsed_us / 1000000));
-        mb.Hreg(HR_MS, (uint16_t)((tElapsed_us / 1000) % 1000));
-        updateModbusRegs();
+        invalidateDisplay = true;
+        uint32_t ms = (uint32_t)(tElapsed_us / 1000);
+        mb.Hreg(HR_SEC, (uint16_t)(ms / 1000));
+        mb.Hreg(HR_MS,  (uint16_t)(ms % 1000));
+        mb.Hreg(HR_TRIG_FLAG, 1);
       }
     }
+    else if (mode == 5) {
+      // Mode 5: counter cam bien -> CHONG DOI MANH, khong can nhay.
+      // Mode 1/2 KHONG bi anh huong (chi check tai day, trong nhanh mode 5).
+      // 1.5s giua 2 lan dem => tranh hat ket / rung cam bien.
+      static int64_t lastM5Press = -2000000LL;
+      if ((now - lastM5Press) >= 1500000LL) {
+        lastM5Press = now;
+        if (mode5Value < 9999) mode5Value++;
+        mb.Hreg(HR_SEC, (uint16_t)mode5Value);
+        stateChanged = true;
+      }
+    }
+    // Mode 3, 4: nut khong tac dung.
   }
 
-  if (millis() - lastRegUpdateMs > 10) {
-    lastRegUpdateMs = millis();
-    updateModbusRegs();
-  }
-
-  uint16_t colorReady = getColorFromID(mb.Hreg(HR_COLOR_READY));
-  uint16_t colorStop = getColorFromID(mb.Hreg(HR_COLOR_STOP));
-
-  if (stateChanged) {
-    stateChanged = false;
-    if (timerState == STOPPED) {
-      displayTime((unsigned long)(tElapsed_us / 1000), colorStop);
-    } else if (timerState == IDLE) {
-      displayTime(0, colorReady);
+  // ---------- Kiem tra mode 3 / 4 ket thuc ----------
+  if (slaveState == ST_RUNNING && (mode == 3 || mode == 4)) {
+    int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
+    if (cur >= tTarget_us) {
+      tElapsed_us = tTarget_us;
+      slaveState = ST_STOPPED;
+      stateChanged = true;
+      invalidateDisplay = true;
     }
   }
 
-  if (timerState == RUNNING) {
-    if (millis() - lastDisplayMs > REFRESH_MS) {
-      lastDisplayMs = millis();
-      int64_t elapsed = esp_timer_get_time() - tStart_us;
-      if (currentMode == 2 && masterSig == 150) {
-        displayTime(0, colorReady); // False start phase: keep LED at 0
+  updateStateReg();
+
+  // ---------- Hien thi ----------
+  bool needRefresh = stateChanged || (millis() - lastDisplayMs > REFRESH_MS);
+  if (needRefresh) {
+    lastDisplayMs = millis();
+    stateChanged = false;
+
+    if (invalidateDisplay) {
+      clearScreen();
+      invalidateDisplay = false;
+    }
+
+    if (slaveState == ST_RUNNING) {
+      if (mode == 1 || mode == 2) {
+        runSquareEffect(colorRdy);
+      } else if (mode == 3) {
+        int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
+        int64_t remain = tTarget_us - cur;
+        if (remain < 0) remain = 0;
+        displayNumber((uint32_t)(remain / 1000000), colorRdy);
+      } else if (mode == 4) {
+        int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
+        displayNumber((uint32_t)(cur / 1000000), colorRdy);
+      } else if (mode == 5) {
+        displayNumber(mode5Value, colorRdy);
+      }
+    }
+    else if (slaveState == ST_PAUSED) {
+      if (mode == 3) {
+        int64_t remain = tTarget_us - tElapsed_us;
+        if (remain < 0) remain = 0;
+        displayNumber((uint32_t)(remain / 1000000), colorRdy);
+      } else if (mode == 4) {
+        displayNumber((uint32_t)(tElapsed_us / 1000000), colorRdy);
+      }
+    }
+    else if (slaveState == ST_STOPPED) {
+      if (mode == 1 || mode == 2) {
+        displayTime((unsigned long)(tElapsed_us / 1000), colorStop);
+      } else if (mode == 3) {
+        displayNumber(0, colorStop);
+      } else if (mode == 4) {
+        displayNumber((uint32_t)(tTarget_us / 1000000), colorStop);
+      } else if (mode == 5) {
+        displayNumber(mode5Value, colorStop);
+      }
+    }
+    else { // IDLE
+      if (mode == 3) {
+        displayNumber(target, colorRdy);   // hien target ban dau
+      } else if (mode == 4) {
+        displayNumber(0, colorRdy);
+      } else if (mode == 5) {
+        displayNumber(mode5Value, colorRdy);
       } else {
-        displayTime((unsigned long)(elapsed / 1000), colorReady);
+        displayTime(0, colorRdy);
       }
     }
   }
@@ -426,62 +473,77 @@ void loop() {
   yield();
 }
 
-void updateModbusRegs() {
-  uint16_t mode = mb.Hreg(HR_MODE);
-  if (timerState == RUNNING) {
-    mb.Hreg(HR_COUNT_STATE, 100);
-    if (mode == 2) {
-      uint32_t elapsed_ms =
-          (uint32_t)((esp_timer_get_time() - tStart_us) / 1000);
-      mb.Hreg(HR_SEC, (uint16_t)(elapsed_ms / 1000));
-      mb.Hreg(HR_MS, (uint16_t)(elapsed_ms % 1000));
-    }
-  } else if (timerState == STOPPED) {
-    mb.Hreg(HR_COUNT_STATE, 200);
-    if (mode == 2) {
-      uint32_t elapsed_ms = (uint32_t)(tElapsed_us / 1000);
-      mb.Hreg(HR_SEC, (uint16_t)(elapsed_ms / 1000));
-      mb.Hreg(HR_MS, (uint16_t)(elapsed_ms % 1000));
-    }
-  } else {
-    mb.Hreg(HR_COUNT_STATE, 0);
-    mb.Hreg(HR_SEC, 0);
-    mb.Hreg(HR_MS, 0);
+void updateStateReg() {
+  uint16_t st = 0;
+  switch (slaveState) {
+    case ST_RUNNING: st = 100; break;
+    case ST_STOPPED: st = 200; break;
+    case ST_PAUSED:  st = 300; break;
+    default:         st = 0;   break;
   }
-
-  if (mb.Hreg(HR_SYNC_FLAG) == 1) {
-    mb.Hreg(HR_SYNC_FLAG, 0);
-  }
+  mb.Hreg(HR_COUNT_STATE, st);
 }
 
+// ===================== HIEU UNG VE HINH VUONG =====================
+// Ve duong vien hinh vuong, co 1 doan sang chay xoay vong quanh chu vi.
+void runSquareEffect(uint16_t color) {
+  static int phase = 0;
+
+  const int x0 = 1;
+  const int y0 = 1;
+  const int W = PANEL_RES_X - 2;
+  const int H = PANEL_RES_Y - 2;
+  const int perim = 2 * W + 2 * H - 4;
+  const int segLen = perim / 3;
+
+  virtualDisp->fillScreen(colBlack);
+
+  // Khung mo (tat dieu chinh sang/toi -> dung mau full)
+  virtualDisp->drawRect(x0, y0, W, H, color);
+
+  // Doan sang (ve them lop 2 pixel cho day hon de "lap lanh")
+  for (int i = 0; i < segLen; i++) {
+    int p = (phase + i) % perim;
+    int px, py;
+    if (p < W) { px = x0 + p; py = y0; }
+    else if (p < W + H - 1) { px = x0 + W - 1; py = y0 + (p - W + 1); }
+    else if (p < 2 * W + H - 2) { px = x0 + W - 1 - (p - W - H + 2); py = y0 + H - 1; }
+    else { px = x0; py = y0 + H - 1 - (p - 2 * W - H + 3); }
+    virtualDisp->drawPixel(px, py, color);
+    // pixel ke ben de doan dam hon
+    if (i < segLen - 1) {
+      int p2 = (phase + i + 1) % perim;
+      int qx, qy;
+      if (p2 < W) { qx = x0 + p2; qy = y0 + 1; }
+      else if (p2 < W + H - 1) { qx = x0 + W - 2; qy = y0 + (p2 - W + 1); }
+      else if (p2 < 2 * W + H - 2) { qx = x0 + W - 1 - (p2 - W - H + 2); qy = y0 + H - 2; }
+      else { qx = x0 + 1; qy = y0 + H - 1 - (p2 - 2 * W - H + 3); }
+      if (qx >= x0 && qx < x0 + W && qy >= y0 && qy < y0 + H) {
+        virtualDisp->drawPixel(qx, qy, color);
+      }
+    }
+  }
+
+  phase = (phase + 3) % perim;
+  // Bao toan cua format/buffer cu de displayTime/Number ve sau redraw day du
+  prevFormat = -1;
+  prevBuf[0] = '\0';
+}
+
+void clearScreen() {
+  virtualDisp->fillScreen(colBlack);
+  prevFormat = -1;
+  prevBuf[0] = '\0';
+}
+
+// ===================== DISPLAY (so / thoi gian) =====================
 int calcFixedWidth(const char *s) {
   int w = 0;
-  for (int i = 0; s[i]; i++) {
-    w += (s[i] == '.') ? dotAdv : digitAdv;
-  }
+  for (int i = 0; s[i]; i++) w += (s[i] == '.') ? dotAdv : digitAdv;
   return w;
 }
 
-void displayTime(unsigned long ms, uint16_t color) {
-  unsigned long sec = ms / 1000;
-  unsigned long frac = ms % 1000;
-
-  int curFormat;
-  char buf[16];
-  if (sec < 10) {
-    sprintf(buf, "%lu.%03lu", sec, frac);
-    curFormat = 1;
-  } else if (sec < 100) {
-    sprintf(buf, "%lu.%02lu", sec, frac / 10);
-    curFormat = 2;
-  } else if (sec < 1000) {
-    sprintf(buf, "%lu.%01lu", sec, frac / 100);
-    curFormat = 3;
-  } else {
-    sprintf(buf, "%lu", sec);
-    curFormat = 4;
-  }
-
+void renderBuf(const char *buf, int curFormat, uint16_t color) {
   const GFXfont *font = &FreeSansBold12pt7b;
   virtualDisp->setFont(font);
   virtualDisp->setTextSize(1);
@@ -496,6 +558,9 @@ void displayTime(unsigned long ms, uint16_t color) {
       int oldW = calcFixedWidth(prevBuf);
       int oldX = (PANEL_RES_X - oldW) / 2;
       virtualDisp->fillRect(oldX, cy + textYoff, oldW, textH, colBlack);
+    } else {
+      // tu hieu ung / clear sang text -> xoa toan vung text
+      virtualDisp->fillRect(0, cy + textYoff, PANEL_RES_X, textH, colBlack);
     }
     virtualDisp->setTextColor(color);
     int posX = cx;
@@ -519,8 +584,28 @@ void displayTime(unsigned long ms, uint16_t color) {
       posX += (buf[i] == '.') ? dotAdv : digitAdv;
     }
   }
-
   strcpy(prevBuf, buf);
   prevColor = color;
   prevFormat = curFormat;
+}
+
+void displayTime(unsigned long ms, uint16_t color) {
+  unsigned long sec = ms / 1000;
+  unsigned long frac = ms % 1000;
+  int curFormat;
+  char buf[16];
+  if (sec < 10)         { sprintf(buf, "%lu.%03lu", sec, frac);          curFormat = 1; }
+  else if (sec < 100)   { sprintf(buf, "%lu.%02lu", sec, frac / 10);     curFormat = 2; }
+  else if (sec < 1000)  { sprintf(buf, "%lu.%01lu", sec, frac / 100);    curFormat = 3; }
+  else                  { sprintf(buf, "%lu", sec);                      curFormat = 4; }
+  renderBuf(buf, curFormat, color);
+}
+
+void displayNumber(uint32_t n, uint16_t color) {
+  if (n > 9999) n = 9999;
+  char buf[8];
+  sprintf(buf, "%lu", (unsigned long)n);
+  // dung format theo so chu so (+10 de tach khoi format displayTime)
+  int curFormat = 10 + strlen(buf);
+  renderBuf(buf, curFormat, color);
 }
