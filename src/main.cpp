@@ -127,6 +127,6 @@ void setup() {
 }
 
 void loop() {
-   Serial.println("2");
+   Serial.println("3");
   delay(1000);
 }
