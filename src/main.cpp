@@ -20,7 +20,7 @@
 // ===================== OTA =====================
 const char* WIFI_SSID     = "ATProSoft";
 const char* WIFI_PASSWORD = "ATPro1234560";
-const int FIRMWARE_VERSION = 12;
+const int FIRMWARE_VERSION = 13;
 
 // URL OTA tu dong khop voi build env (slave1 / slave2) qua MODBUS_SLAVE_ID.
 #define _STR(x) #x
@@ -321,6 +321,8 @@ void loop() {
       slaveState = ST_RUNNING;
       stateChanged = true;
       invalidateDisplay = true;
+      // Mode 1: slave KHONG dem (chi hieu ung), master dem.
+      // Mode 2: slave tu dem.
     }
     else if (sig == SIG_PAUSE) {
       if (slaveState == ST_RUNNING) {
@@ -425,6 +427,12 @@ void loop() {
     if (slaveState == ST_RUNNING) {
       if (mode == 1 || mode == 2) {
         runSquareEffect(colorRdy);
+        // Mode 1: chi hieu ung, ko hien so (master dem).
+        // Mode 2: hien so dem cua slave.
+        if (mode == 2) {
+          int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
+          displayTime((unsigned long)(cur / 1000), colorRdy);
+        }
       } else if (mode == 3) {
         int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
         int64_t remain = tTarget_us - cur;

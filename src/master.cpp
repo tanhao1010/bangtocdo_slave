@@ -217,9 +217,10 @@ void startCurrent() {
   }
   if (currentMode == 3 || currentMode == 4) writeBoth(HR_TARGET, targetSec);
   sendSigBoth(SIG_START);
-  tStart_ms = millis();
-  tElapsed_ms = 0;
+  // Mode 2: master KHONG dem, chi chuyen state -> slave tu dem.
+  // Mode 3/4: slave dem theo target.
   mState = M_RUNNING;
+  tStart_ms = tElapsed_ms = 0;
 }
 
 void pauseCurrent() {
@@ -237,6 +238,9 @@ void resumeCurrent() {
 }
 
 void stopAndPushFinal(uint32_t finalMs) {
+  // Luu final time vao tElapsed_ms -> apiStatus tra masterMs dung sau khi STOP.
+  tElapsed_ms = finalMs;
+  tStart_ms   = 0;
   uint16_t s  = (uint16_t)(finalMs / 1000);
   uint16_t ms = (uint16_t)(finalMs % 1000);
   writeBoth(HR_SEC, s);
@@ -358,9 +362,13 @@ void apiStatus() {
   doc["colorStop"] = (uint16_t)colorStop;
   doc["winner"]    = (uint8_t)mode2Winner;
 
-  // Thoi gian dang chay tren master (mode 1) - tinh tu millis() atomic.
-  uint32_t live_ms = tElapsed_ms;
-  if (mState == M_RUNNING && currentMode == 1) live_ms += (millis() - tStart_ms);
+  // Mode 1: master dem -> masterMs la thoi gian chinh.
+  // Mode 2/3/4/5: slave dem -> masterMs = 0, web lay tu slave.
+  uint32_t live_ms = 0;
+  if (currentMode == 1) {
+    live_ms = tElapsed_ms;
+    if (mState == M_RUNNING) live_ms += (millis() - tStart_ms);
+  }
   doc["masterMs"] = live_ms;
 
   JsonObject s1 = doc["slave1"].to<JsonObject>();
