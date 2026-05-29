@@ -11,7 +11,7 @@ const char* WIFI_PASSWORD = "ATPro1234560";
 
 // 2) Version firmware hiện tại đang chạy trên ESP32.
 //    Mỗi lần build firmware mới -> tăng số này lên (vd 1 -> 2)
-const int FIRMWARE_VERSION = 4;
+const int FIRMWARE_VERSION = 5;
 
 // 3) URL raw trên GitHub (đổi USER/REPO/BRANCH cho đúng repo của bạn)
 //    File version.txt chỉ chứa 1 số nguyên, vd: 2
@@ -138,6 +138,6 @@ void setup() {
 }
 
 void loop() {
-   Serial.println("10");
+   Serial.println("11");
   delay(1000);
 }
