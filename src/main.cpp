@@ -138,6 +138,6 @@ void setup() {
 }
 
 void loop() {
-   Serial.println("4");
+   Serial.println("10");
   delay(1000);
 }
