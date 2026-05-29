@@ -76,20 +76,31 @@ int getRemoteVersion() {
 void doUpdate() {
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(20);
+  client.setTimeout(30);
 
   Serial.println("Bat dau tai firmware moi...");
-  httpUpdate.rebootOnUpdate(true);  // tu reboot sau khi update xong
-  // raw.githubusercontent co the chuyen huong -> phai cho phep follow
-  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-  t_httpUpdate_return ret = httpUpdate.update(client, FIRMWARE_URL);
+  // Tao instance rieng voi timeout 30s (mac dinh chi 8s -> tai file lon bi
+  // read Timeout). Constructor HTTPUpdate(int) nhan timeout tinh bang ms.
+  HTTPUpdate updater(30000);
+  updater.rebootOnUpdate(true);  // tu reboot sau khi update xong
+  // raw.githubusercontent co the chuyen huong -> phai cho phep follow
+  updater.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  // In tien do tai (%) ra serial
+  updater.onProgress([](int cur, int total) {
+    Serial.printf("Tai: %d / %d bytes (%d%%)\r",
+                  cur, total, total ? (cur * 100 / total) : 0);
+  });
+
+  t_httpUpdate_return ret = updater.update(client, FIRMWARE_URL);
+  Serial.println();
 
   switch (ret) {
     case HTTP_UPDATE_FAILED:
       Serial.printf("Update that bai (%d): %s\n",
-                    httpUpdate.getLastError(),
-                    httpUpdate.getLastErrorString().c_str());
+                    updater.getLastError(),
+                    updater.getLastErrorString().c_str());
       break;
     case HTTP_UPDATE_NO_UPDATES:
       Serial.println("Khong co update.");
