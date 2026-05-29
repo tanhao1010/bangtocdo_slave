@@ -382,35 +382,27 @@ void apiStatus() {
   server.send(200, "application/json", out);
 }
 
-// Cac API command KHONG goi Modbus truc tiep -> day vao queue, return ngay.
-// Modbus task se boc ra va thuc thi -> HTTP khong bao gio bi block.
-static inline bool takeQ() {
-  return cmdMutex && xSemaphoreTake(cmdMutex, pdMS_TO_TICKS(50)) == pdTRUE;
-}
-static inline void giveQ() {
-  if (cmdMutex) xSemaphoreGive(cmdMutex);
-}
-
 void apiMode() {
   if (!server.hasArg("m")) { apiErr("missing m"); return; }
   int m = server.arg("m").toInt();
   if (m < 1 || m > 5) { apiErr("mode 1..5"); return; }
-  if (takeQ()) { pending.newMode = (int16_t)m; giveQ(); }
+  setMode((uint8_t)m);
   apiOk();
 }
 
-void apiArm()    { if (takeQ()) { pending.armFlag    = true; giveQ(); } apiOk(); }
-void apiStart()  { if (takeQ()) { pending.startFlag  = true; giveQ(); } apiOk(); }
-void apiPause()  { if (takeQ()) { pending.pauseFlag  = true; giveQ(); } apiOk(); }
-void apiResume() { if (takeQ()) { pending.resumeFlag = true; giveQ(); } apiOk(); }
-void apiStop()   { if (takeQ()) { pending.stopFlag   = true; giveQ(); } apiOk(); }
-void apiReset()  { if (takeQ()) { pending.resetFlag  = true; giveQ(); } apiOk(); }
+void apiArm()    { armCurrent();    apiOk(); }
+void apiStart()  { startCurrent();  apiOk(); }
+void apiPause()  { pauseCurrent();  apiOk(); }
+void apiResume() { resumeCurrent(); apiOk(); }
+void apiStop()   { stopCurrent();   apiOk(); }
+void apiReset()  { resetAll();      apiOk(); }
 
 void apiTarget() {
   if (!server.hasArg("s")) { apiErr("missing s"); return; }
   int n = server.arg("s").toInt();
   if (n < 0) n = 0; if (n > 9999) n = 9999;
-  if (takeQ()) { pending.newTarget = (int16_t)n; giveQ(); }
+  targetSec = (uint16_t)n;
+  writeBoth(HR_TARGET, targetSec);
   apiOk();
 }
 
@@ -420,26 +412,21 @@ void apiSet() {
   int n  = server.arg("v").toInt();
   if (sl != 1 && sl != 2) { apiErr("slave 1|2"); return; }
   if (n < 0) n = 0; if (n > 9999) n = 9999;
-  if (takeQ()) {
-    if (sl == 1) pending.newSet1 = (int16_t)n;
-    else         pending.newSet2 = (int16_t)n;
-    giveQ();
-  }
+  writeReg((uint8_t)sl, HR_TARGET, (uint16_t)n);
   apiOk();
 }
 
 void apiColor() {
-  if (takeQ()) {
-    if (server.hasArg("ready")) {
-      int v = server.arg("ready").toInt();
-      if (v == 1 || v == 2) pending.newColorR = (int16_t)v;
-    }
-    if (server.hasArg("stop")) {
-      int v = server.arg("stop").toInt();
-      if (v == 1 || v == 2) pending.newColorS = (int16_t)v;
-    }
-    giveQ();
+  if (server.hasArg("ready")) {
+    int v = server.arg("ready").toInt();
+    if (v == 1 || v == 2) colorReady = v;
   }
+  if (server.hasArg("stop")) {
+    int v = server.arg("stop").toInt();
+    if (v == 1 || v == 2) colorStop = v;
+  }
+  writeBoth(HR_COLOR_READY, colorReady);
+  writeBoth(HR_COLOR_STOP, colorStop);
   apiOk();
 }
 
@@ -555,88 +542,14 @@ void setupRoutes() {
 }
 
 // ============================================================
-//                       MODBUS TASK (core 0)
-// ============================================================
-// Tat ca thao tac LoRa/Modbus dieu khien o day -> KHONG block loop() chinh,
-// nho do server.handleClient() chay het toc do tren core 1.
-void modbusTask(void* /*arg*/) {
-  uint32_t lastTickMs = 0;
-  uint32_t lastCache  = 0;
-  for (;;) {
-    mb.task();
-
-    // Boc command queue va thuc thi.
-    PendingCmd local;
-    bool hasCmd = false;
-    if (cmdMutex && xSemaphoreTake(cmdMutex, 0) == pdTRUE) {
-      if (pending.armFlag || pending.startFlag || pending.pauseFlag ||
-          pending.resumeFlag || pending.stopFlag || pending.resetFlag ||
-          pending.newMode >= 0 || pending.newTarget >= 0 ||
-          pending.newSet1 >= 0 || pending.newSet2 >= 0 ||
-          pending.newColorR >= 0 || pending.newColorS >= 0) {
-        local = pending;
-        pending = PendingCmd();
-        hasCmd = true;
-      }
-      xSemaphoreGive(cmdMutex);
-    }
-    if (hasCmd) {
-      if (local.newMode >= 1) setMode((uint8_t)local.newMode);
-      bool colorChanged = false;
-      if (local.newColorR >= 1) { colorReady = (uint16_t)local.newColorR; colorChanged = true; }
-      if (local.newColorS >= 1) { colorStop  = (uint16_t)local.newColorS; colorChanged = true; }
-      if (colorChanged) {
-        writeBoth(HR_COLOR_READY, colorReady);
-        writeBoth(HR_COLOR_STOP,  colorStop);
-      }
-      if (local.newTarget >= 0) {
-        targetSec = (uint16_t)local.newTarget;
-        writeBoth(HR_TARGET, targetSec);
-      }
-      if (local.newSet1 >= 0) writeReg(SLAVE1_ID, HR_TARGET, (uint16_t)local.newSet1);
-      if (local.newSet2 >= 0) writeReg(SLAVE2_ID, HR_TARGET, (uint16_t)local.newSet2);
-      if (local.resetFlag)  resetAll();
-      if (local.armFlag)    armCurrent();
-      if (local.startFlag)  startCurrent();
-      if (local.pauseFlag)  pauseCurrent();
-      if (local.resumeFlag) resumeCurrent();
-      if (local.stopFlag)   stopCurrent();
-    }
-
-    // Tick mode (rat nhanh khi mode 1 dang dua).
-    bool mode1Race = (currentMode == 1 && (mState == M_ARMED || mState == M_RUNNING));
-    if (mode1Race) {
-      tickMode1();
-    } else if (millis() - lastTickMs > 100) {
-      lastTickMs = millis();
-      switch (currentMode) {
-        case 1: tickMode1();  break;
-        case 2: tickMode2();  break;
-        case 3: tickMode34(); break;
-        case 4: tickMode34(); break;
-      }
-    }
-
-    // Cache poll (skip khi mode 1 dang dua - master tu update masterMs).
-    if (!mode1Race) {
-      uint32_t cacheInt = (mState == M_RUNNING || mState == M_PAUSED) ? 250 : 800;
-      if (millis() - lastCache > cacheInt) {
-        lastCache = millis();
-        pollStatusCache();
-      }
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(2));
-  }
-}
-
-// ============================================================
 //                          SETUP / LOOP
 // ============================================================
+uint32_t lastTickMs = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(400);
-  Serial.println("\n=== MASTER (Web + LoRa Modbus, dual-task) ===");
+  Serial.println("\n=== MASTER (Web + LoRa Modbus) ===");
 
   Serial2.begin(LORA_BAUD, SERIAL_8N1, LORA_RX_PIN, LORA_TX_PIN);
   mb.begin(&Serial2);
@@ -651,25 +564,43 @@ void setup() {
   server.begin();
   Serial.println("HTTP server started.");
 
-  cmdMutex = xSemaphoreCreateMutex();
-  // Modbus task tren core 0 -> arduinoTask (loop) chay tu do tren core 1.
-  xTaskCreatePinnedToCore(modbusTask, "mb", 8192, NULL, 1, &modbusTaskHandle, 0);
-
-  // Day cau hinh khoi tao xuong 2 slave (qua queue de modbus task xu ly)
-  if (takeQ()) {
-    pending.newColorR = (int16_t)colorReady;
-    pending.newColorS = (int16_t)colorStop;
-    pending.newMode   = (int16_t)currentMode;
-    pending.resetFlag = true;
-    giveQ();
-  }
+  // Day cau hinh khoi tao xuong 2 slave
+  pushModeAndColors();
+  sendSigBoth(SIG_IDLE);
 
   Serial.println("Type 'help' for serial commands.");
 }
 
 void loop() {
-  // Loop chinh chi phuc vu HTTP + console. KHONG dung Modbus o day.
+  mb.task();
   server.handleClient();
   pollSerial();
+
+  // Mode 1 dang dua: poll het toc do.
+  bool mode1Race = (currentMode == 1 && (mState == M_ARMED || mState == M_RUNNING));
+
+  if (mode1Race) {
+    tickMode1();
+  } else if (millis() - lastTickMs > 100) {
+    lastTickMs = millis();
+    switch (currentMode) {
+      case 1: tickMode1();  break;
+      case 2: tickMode2();  break;
+      case 3: tickMode34(); break;
+      case 4: tickMode34(); break;
+      case 5: /* khong tick tich cuc */ break;
+    }
+  }
+
+  // Cache poll (skip khi mode 1 dang dua - master tu cap nhat masterMs).
+  if (!mode1Race) {
+    static uint32_t lastCache = 0;
+    uint32_t cacheInt = (mState == M_RUNNING || mState == M_PAUSED) ? 250 : 800;
+    if (millis() - lastCache > cacheInt) {
+      lastCache = millis();
+      pollStatusCache();
+    }
+  }
+
   delay(1);
 }
