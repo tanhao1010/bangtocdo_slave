@@ -8,6 +8,8 @@ const app = {
     swRunning: false,
     swStart: 0,
     swElapsed: 0,
+    lane1Elapsed: 0,
+    lane2Elapsed: 0,
     lapCount: 0,
     tournamentName: "Giải đấu trượt Patin chuyên nghiệp",
     lane1Idx: 0,
@@ -40,7 +42,7 @@ const app = {
       }
     },
     post(path, params) { return this._do('POST', path, params); },
-    get(path, params)  { return this._do('GET',  path, params); }
+    get(path, params) { return this._do('GET', path, params); }
   },
 
   // ── KHỞI TẠO ──
@@ -365,7 +367,8 @@ const app = {
   saveCurrentDrafts() {
     if (this.state.raceMode !== 'qualifying' || this.state.currentCandidates.length === 0) return;
 
-    const tSec = this.state.swElapsed / 1000;
+    const tSec1 = (this.state.lane1Elapsed || 0) / 1000;
+    const tSec2 = (this.state.lane2Elapsed || 0) / 1000;
 
     // Đọc điểm penalty (số nguyên) và lưu nguyên gốc vào draft
     const pen1Raw = document.getElementById('l1-pen').innerText;
@@ -376,8 +379,8 @@ const app = {
     const i1 = this.state.lane1Idx;
     if (this.state.currentCandidates[i1]) {
       // Chỉ lưu time nếu có chạy, để tránh đè time = 0 lên time cũ
-      if (tSec > 0 || !this.state.raceDraft[i1]) {
-        this.state.raceDraft[i1] = { time: tSec, penalty: pen1 };
+      if (tSec1 > 0 || !this.state.raceDraft[i1]) {
+        this.state.raceDraft[i1] = { time: tSec1, penalty: pen1 };
       } else {
         this.state.raceDraft[i1].penalty = pen1;
       }
@@ -385,8 +388,8 @@ const app = {
 
     const i2 = this.state.lane2Idx;
     if (this.state.layoutMode !== 'solo' && this.state.currentCandidates[i2]) {
-      if (tSec > 0 || !this.state.raceDraft[i2]) {
-        this.state.raceDraft[i2] = { time: tSec, penalty: pen2 };
+      if (tSec2 > 0 || !this.state.raceDraft[i2]) {
+        this.state.raceDraft[i2] = { time: tSec2, penalty: pen2 };
       } else {
         this.state.raceDraft[i2].penalty = pen2;
       }
@@ -597,7 +600,7 @@ const app = {
     if (!data || !data.mode) return;
 
     const mode = data.mode;
-    const mst  = data.mState; // 0=IDLE 1=ARMED 2=RUNNING 3=PAUSED 4=FINISHED
+    const mst = data.mState; // 0=IDLE 1=ARMED 2=RUNNING 3=PAUSED 4=FINISHED
 
     let lane1Ms = 0, lane2Ms = 0;
     if (mode === 1) {
@@ -611,6 +614,8 @@ const app = {
     this.updateLaneTimeDisplay('l1', lane1Ms);
     if (this.state.layoutMode !== 'solo') this.updateLaneTimeDisplay('l2', lane2Ms);
     this.state.swElapsed = Math.max(lane1Ms, lane2Ms);
+    this.state.lane1Elapsed = lane1Ms;
+    this.state.lane2Elapsed = lane2Ms;
 
     // Mode 1: khi cam bien start trigger (master da vao RUNNING)
     if (mode === 1 && mst === 2 && this.state.swRunning) {
@@ -669,6 +674,8 @@ const app = {
     this._stopPolling();
     this.state.swRunning = false;
     this.state.swElapsed = 0;
+    this.state.lane1Elapsed = 0;
+    this.state.lane2Elapsed = 0;
     await this.api.post('/api/reset');
 
     if (this.state.raceMode === 'mass-start') {
@@ -686,6 +693,8 @@ const app = {
   },
 
   async customLock() {
+    this._stopPolling();
+    this.state.swRunning = false;
     await this.api.post('/api/stop');
     if (this.state.raceMode === 'qualifying') {
       document.getElementById('modal-round-select').classList.add('active');

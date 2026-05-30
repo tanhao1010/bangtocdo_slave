@@ -16,11 +16,60 @@
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include "driver/i2s.h"
 
 // ---------- HW LoRa ----------
 #define LORA_RX_PIN   16
 #define LORA_TX_PIN   17
 #define LORA_BAUD     115200
+
+// ---------- I2S Audio (loa phat hieu ung am thanh, vd MAX98357A) ----------
+#define I2S_BCK   25
+#define I2S_LRCK  32
+#define I2S_DOUT  33
+#define I2S_PORT  I2S_NUM_0
+
+void setupI2S() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = 16000,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 512,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = 0
+  };
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCK,
+    .ws_io_num = I2S_LRCK,
+    .data_out_num = I2S_DOUT,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_PORT, &pin_config);
+  i2s_zero_dma_buffer(I2S_PORT);
+}
+
+// Phat 1 file WAV (16kHz/16bit mono) tu LittleFS. Blocking cho den khi phat xong.
+void playWav(const char* path) {
+  File wavFile = LittleFS.open(path, "r");
+  if (!wavFile) {
+    Serial.printf("Khong mo duoc WAV: %s\n", path);
+    return;
+  }
+  wavFile.seek(44);  // bo qua header WAV 44 byte
+  uint8_t buffer[1024];
+  size_t bytesRead, bytesWritten;
+  while (wavFile.available()) {
+    bytesRead = wavFile.read(buffer, sizeof(buffer));
+    i2s_write(I2S_PORT, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
+  }
+  wavFile.close();
+}
 
 // ---------- Slave IDs ----------
 #define SLAVE1_ID 1
@@ -82,6 +131,11 @@ struct SlaveCache {
 SlaveCache cache1, cache2;
 
 volatile uint8_t mode2Winner = 0;
+
+// ---------- Mode 1 audio state ----------
+// Thoi diem bat dau lang nghe cam bien slave1 (ngay sau ready.wav).
+volatile uint32_t mode1ArmMs    = 0;
+volatile bool     mode1BepPlayed = false;
 
 // ---------- Command queue (web -> modbus task) ----------
 struct PendingCmd {
@@ -187,14 +241,23 @@ void pushModeAndColors() {
   writeBoth(HR_MODE, currentMode);
 }
 
-void setMode(uint8_t m) {
-  if (m < 1 || m > 5) return;
-  currentMode = m;
+// Reset sach toan bo trang thai dua (state, timer, winner, co am thanh, cache slave).
+void clearRaceState() {
   mState = M_IDLE;
   tStart_ms = tElapsed_ms = 0;
   mode2Winner = 0;
+  mode1ArmMs = 0;
+  mode1BepPlayed = false;
+  cache1.state = cache1.sec = cache1.ms = cache1.value = 0;
+  cache2.state = cache2.sec = cache2.ms = cache2.value = 0;
+}
+
+void setMode(uint8_t m) {
+  if (m < 1 || m > 5) return;
+  currentMode = m;
+  clearRaceState();          // doi mode -> reset sach de mode moi chay dung
   pushModeAndColors();
-  sendSigBoth(SIG_IDLE);
+  sendSigBoth(SIG_IDLE);      // bao 2 slave ve trang thai idle (xoa hinh/so cu)
 }
 
 void armCurrent() {
@@ -208,16 +271,46 @@ void armCurrent() {
 
 void startCurrent() {
   if (currentMode == 1) {
+    // --- Hieu ung am thanh intro ---
+    // teng -> nghi 1s -> onyourmask -> nghi 3s -> ready (dong thoi bao slave dem xuong)
+    playWav("/teng.wav");
+    delay(1000);
+    playWav("/onyourmask.wav");
+    delay(3000);
+    // Ready: bao 2 slave bat dau dem xuong (ve hinh vuong) dong thoi phat ready.wav
     sendSigBoth(SIG_START);
     writeReg(SLAVE1_ID, HR_TRIG_FLAG, 0);
     writeReg(SLAVE2_ID, HR_TRIG_FLAG, 0);
+    playWav("/ready.wav");
     mState = M_ARMED;
     tStart_ms = tElapsed_ms = 0;
+    mode1ArmMs = millis();
+    mode1BepPlayed = false;
+    return;
+  }
+  if (currentMode == 2) {
+    // --- Hieu ung am thanh intro mode 2 ---
+    // teng -> nghi 1s -> onyourmask -> nghi 3s -> set -> nghi 5s -> sung (bat dau)
+    playWav("/teng.wav");
+    delay(1000);
+    playWav("/onyourmask.wav");
+    delay(3000);
+    playWav("/set.wav");
+    delay(5000);
+    // Sung: bao 2 slave bat dau dem xuong (ve hinh vuong) dong thoi phat sung.wav
+    sendSigBoth(SIG_START);
+    writeReg(SLAVE1_ID, HR_TRIG_FLAG, 0);
+    writeReg(SLAVE2_ID, HR_TRIG_FLAG, 0);
+    cache1.state = 0;
+    cache2.state = 0;
+    playWav("/sung.wav");
+    mState = M_RUNNING;
+    tStart_ms = tElapsed_ms = 0;
+    mode2Winner = 0;
     return;
   }
   if (currentMode == 3 || currentMode == 4) writeBoth(HR_TARGET, targetSec);
   sendSigBoth(SIG_START);
-  // Mode 2: master KHONG dem, chi chuyen state -> slave tu dem.
   // Mode 3/4: slave dem theo target.
   mState = M_RUNNING;
   tStart_ms = tElapsed_ms = 0;
@@ -250,19 +343,24 @@ void stopAndPushFinal(uint32_t finalMs) {
 }
 
 void stopCurrent() {
-  if (mState == M_RUNNING && currentMode == 1) {
-    uint32_t total = tElapsed_ms + (millis() - tStart_ms);
-    stopAndPushFinal(total);
+  if (mState == M_RUNNING) {
+    if (currentMode == 1) {
+      uint32_t total = tElapsed_ms + (millis() - tStart_ms);
+      stopAndPushFinal(total);
+    } else if (currentMode == 2) {
+      sendSigBoth(SIG_FINAL);
+      mState = M_FINISHED;
+    } else {
+      sendSigBoth(SIG_IDLE);
+      mState = M_IDLE;
+    }
   } else {
-    sendSigBoth(SIG_IDLE);
     mState = M_IDLE;
   }
 }
 
 void resetAll() {
-  mState = M_IDLE;
-  tStart_ms = tElapsed_ms = 0;
-  mode2Winner = 0;
+  clearRaceState();
   sendSigBoth(SIG_IDLE);
 }
 
@@ -276,12 +374,19 @@ void tickMode1() {
       tStart_ms = millis();
       tElapsed_ms = 0;
       mState = M_RUNNING;
+      playWav("/ting.wav");   // cam bien slave1 kich -> master bat dau dem
+    } else if (!mode1BepPlayed && mode1ArmMs != 0 && (millis() - mode1ArmMs) > 5000) {
+      // Sau 5s ma slave1 van chua kich -> bao bepbep 3 lan roi cho bang LED ve 0.000
+      mode1BepPlayed = true;
+      for (int i = 0; i < 3; i++) playWav("/bepbep.wav");
+      stopAndPushFinal(0);   // HR_SEC=0, HR_MS=0, SIG_FINAL -> bang LED hien 0.000
     }
   } else if (mState == M_RUNNING) {
     if (readReg(SLAVE2_ID, HR_TRIG_FLAG, trig) && trig == 1) {
       writeReg(SLAVE2_ID, HR_TRIG_FLAG, 0);
       uint32_t total = tElapsed_ms + (millis() - tStart_ms);
       stopAndPushFinal(total);
+      playWav("/ting.wav");   // cam bien slave2 kich -> dung dem
     }
   }
 }
@@ -290,20 +395,32 @@ void tickMode2() {
   if (mState != M_RUNNING) return;
   for (int idx = 0; idx < 2; idx++) {
     uint8_t id = (idx == 0) ? SLAVE1_ID : SLAVE2_ID;
-    uint8_t other = (idx == 0) ? SLAVE2_ID : SLAVE1_ID;
     uint16_t trig = 0;
-    if (!readReg(id, HR_TRIG_FLAG, trig)) continue;
-    if (trig != 1) continue;
-    writeReg(id, HR_TRIG_FLAG, 0);
-    uint16_t s = 0, ms = 0;
-    readReg(id, HR_SEC, s);
-    readReg(id, HR_MS, ms);
-    writeReg(other, HR_SEC, s);
-    writeReg(other, HR_MS, ms);
-    writeReg(other, HR_MASTER_SIG, SIG_FINAL);
-    mode2Winner = id;
+    if (readReg(id, HR_TRIG_FLAG, trig) && trig == 1) {
+      writeReg(id, HR_TRIG_FLAG, 0);
+      uint16_t s = 0, ms = 0;
+      if (readReg(id, HR_SEC, s) && readReg(id, HR_MS, ms)) {
+        if (id == SLAVE1_ID) {
+          cache1.sec = s;
+          cache1.ms = ms;
+          cache1.state = 200;
+        } else {
+          cache2.sec = s;
+          cache2.ms = ms;
+          cache2.state = 200;
+        }
+      }
+      if (mode2Winner == 0) {
+        mode2Winner = id;
+      }
+      playWav("/ting.wav");   // cam bien kich -> phat ting, slave hien so + bao ve master
+    }
+  }
+
+  bool s1_done = !link1.online || (cache1.state == 200);
+  bool s2_done = !link2.online || (cache2.state == 200);
+  if (s1_done && s2_done) {
     mState = M_FINISHED;
-    return;
   }
 }
 
@@ -566,6 +683,8 @@ void setup() {
 
   if (!LittleFS.begin(true)) Serial.println("LittleFS mount fail!");
   else                       Serial.println("LittleFS OK.");
+
+  setupI2S();
 
   setupWiFi();
   setupRoutes();

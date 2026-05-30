@@ -20,7 +20,7 @@
 // ===================== OTA =====================
 const char* WIFI_SSID     = "ATProSoft";
 const char* WIFI_PASSWORD = "ATPro1234560";
-const int FIRMWARE_VERSION = 15;
+const int FIRMWARE_VERSION = 17;
 
 // URL OTA tu dong khop voi build env (slave1 / slave2) qua MODBUS_SLAVE_ID.
 #define _STR(x) #x
@@ -342,12 +342,8 @@ void loop() {
       // Mode 2: slave tu dung khi kich, KHONG dung khi nhan SIG_FINAL.
       // Master chi gui SIG_FINAL de cap nhat so hien thi cho slave chua dung.
       if (mode == 2 && slaveState == ST_RUNNING) {
-        // Slave dang chay -> chi cap nhat hien thi, KHONG chuyen state.
-        uint32_t s = mb.Hreg(HR_SEC);
-        uint32_t m = mb.Hreg(HR_MS);
-        tElapsed_us = ((int64_t)s * 1000 + m) * 1000;
-        stateChanged = true;
-        invalidateDisplay = true;
+        // Slave dang chay -> BO QUA, tiep tuc dem cua chinh no.
+        // (Master da ghi HR_SEC/HR_MS nhung slave se ghi de len moi 10ms.)
       } else {
         // Mode khac (1/3/4/5) hoac slave da STOPPED -> dung binh thuong.
         uint32_t s = mb.Hreg(HR_SEC);
