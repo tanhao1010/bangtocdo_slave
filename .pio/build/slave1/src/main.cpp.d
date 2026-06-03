@@ -133,6 +133,10 @@
  C:/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
+ C:/.platformio/packages/framework-arduinoespressif32/libraries/HTTPClient/src/HTTPClient.h \
+ C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiClient.h \
+ C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/Client.h \
+ C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src/WiFiClientSecure.h \
  C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFi.h \
  C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
  C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/IPv6Address.h \
@@ -187,15 +191,11 @@
  C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiAP.h \
  C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiScan.h \
  C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiClient.h \
- C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/Client.h \
  C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiServer.h \
  C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/Server.h \
  C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
  C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/Udp.h \
  C:/.platformio/packages/framework-arduinoespressif32/cores/esp32/cbuf.h \
- C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiClient.h \
- C:/.platformio/packages/framework-arduinoespressif32/libraries/HTTPClient/src/HTTPClient.h \
- C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src/WiFiClientSecure.h \
  C:/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src/ssl_client.h \
  C:/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/mbedtls/mbedtls/include/mbedtls/platform.h \
  C:/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/mbedtls/port/include/mbedtls/esp_config.h \
@@ -274,6 +274,7 @@
  .pio/libdeps/slave1/ESP32\ HUB75\ LED\ MATRIX\ PANEL\ DMA\ Display/src/cie_luts.h \
  .pio/libdeps/slave1/Adafruit\ GFX\ Library/Fonts/FreeSansBold12pt7b.h \
  .pio/libdeps/slave1/ESP32\ HUB75\ LED\ MATRIX\ PANEL\ DMA\ Display/src/ESP32-HUB75-MatrixPanel-I2S-DMA.h \
+ .pio/libdeps/slave1/Adafruit\ GFX\ Library/Fonts/FreeSans9pt7b.h \
  .pio/libdeps/slave1/modbus-esp8266/src/ModbusRTU.h \
  .pio/libdeps/slave1/modbus-esp8266/src/ModbusAPI.h \
  .pio/libdeps/slave1/modbus-esp8266/src/Modbus.h \

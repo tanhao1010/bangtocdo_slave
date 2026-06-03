@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ArenaFlow - MÀN HÌNH HIỂN THỊ</title>
+  <!-- Nhập CSS dùng chung của dự án để đảm bảo đồng bộ 100% giao diện và màu sắc -->
+  <link rel="stylesheet" href="style2.css">
+  <style>
+    body,
+    html {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background: #1a2340;
+      overflow: hidden;
+      font-family: 'Be Vietnam Pro', sans-serif;
+    }
+
+    .display-wrapper {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      width: 100%;
+      background: #1a2340;
+    }
+
+    /* Tiêu đề chính giữa, to hơn, không chứa nút bấm */
+    .rv-header {
+      flex-direction: column;
+      justify-content: center;
+      padding: 1.8vh 14px;
+      min-height: 7vh;
+    }
+
+    .rv-title {
+      font-size: min(2.5vh, 4vw);
+      letter-spacing: 2px;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    /* Tối ưu hóa kích thước cho màn hình hiển thị rộng (TV, máy chiếu) */
+    .rv-lanes-wrap {
+      flex: 1;
+      min-height: 0;
+      background: #1a2340;
+    }
+
+    .rv-lane-info {
+      padding: 5vh 2vw;
+      justify-content: space-evenly;
+    }
+
+    /* Tên VĐV & ngày sinh hiển thị lớn và rõ ràng */
+    .rv-m-name {
+      font-size: min(4.5vh, 6vw);
+      font-weight: 900;
+      margin-bottom: 2vh;
+      color: #ffffff;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      text-shadow: 0 4px 15px rgba(0, 0, 0, 0.6);
+    }
+
+    .racer-dob {
+      font-size: min(2.2vh, 3vw);
+      color: #80c0ff;
+      font-weight: 600;
+      margin-top: 0.8vh;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    }
+
+    .lane-2 .racer-dob {
+      color: #40f0b0;
+    }
+
+    /* Thời gian chạy - Đã giảm nhỏ lại 1 chút để tránh bị chạm viền khi mở trên thiết bị hẹp (Mobile) */
+    .rv-m-time {
+      font-size: min(15vh, 14.5vw);
+      margin: 3vh 0;
+      font-weight: 900;
+      text-shadow: 0 0 40px rgba(120, 200, 255, 0.6), 0 5px 15px rgba(0, 0, 0, 0.5);
+    }
+
+    .rv-m-ms {
+      font-size: inherit;
+      color: inherit;
+    }
+
+    /* Status badge đồng bộ góc bo tròn với Penalty */
+    .rv-m-status {
+      font-size: min(2.6vh, 3.5vw);
+      padding: 1vh 3vw;
+      border-radius: 8px;
+      margin-top: 2vh;
+      font-weight: 800;
+      letter-spacing: 1.5px;
+      transition: all 0.2s ease;
+      box-shadow: 0 0 20px rgba(255, 190, 30, 0.15);
+    }
+
+    /* Nhãn hiển thị Penalty cố định (chỉ đọc, không có nút bấm chỉnh sửa) */
+    .rv-pen-wrap {
+      padding: 2.2vh;
+      background: rgba(15, 25, 55, 0.8);
+      border-top: 1px solid rgba(100, 150, 255, 0.15);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .rv-pen-total {
+      font-size: min(2.8vh, 4vw);
+      margin-top: 0;
+      font-weight: 900;
+      color: #ff7675;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    /* CSS hiển thị các ô nhỏ Round Indicator (Chỉ cho chế độ hiển thị 2 line) */
+    .rv-round-indicator {
+      display: flex;
+      gap: 1.2vh;
+      justify-content: center;
+      margin-bottom: 1.5vh;
+    }
+
+    .round-dot {
+      width: min(3.8vh, 5.5vw);
+      height: min(3.8vh, 5.5vw);
+      border-radius: 50%;
+      border: 1.5px solid rgba(100, 150, 255, 0.25);
+      background: rgba(30, 45, 80, 0.4);
+      color: #80c0ff;
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 800;
+      font-size: min(1.8vh, 2.8vw);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.25s ease;
+    }
+
+    .round-dot.active {
+      background: #f97316;
+      border-color: #f97316;
+      color: #fff;
+      box-shadow: 0 0 12px rgba(249, 115, 22, 0.5);
+    }
+
+    .round-dot.lose {
+      background: rgba(70, 80, 105, 0.5);
+      border-color: rgba(130, 145, 170, 0.35);
+      color: rgba(190, 205, 225, 0.65);
+    }
+
+    /* Ở chế độ 1 làn (Solo), tự động ẩn các ô hiển thị Round này */
+    .solo-mode .rv-round-indicator {
+      display: none !important;
+    }
+
+    /* Hiển thị DQ nhấp nháy nổi bật */
+    #l1-pen.dq,
+    #l2-pen.dq {
+      color: #ff4757;
+      font-weight: 900;
+      text-shadow: 0 0 15px rgba(255, 71, 87, 0.8);
+      animation: pulse-dq 1s infinite alternate;
+    }
+
+    @keyframes pulse-dq {
+      from {
+        opacity: 0.6;
+      }
+
+      to {
+        opacity: 1;
+      }
+    }
+
+    /* Tự động tăng kích thước khi ở chế độ 1 làn (Solo) */
+    .solo-mode .rv-m-name {
+      font-size: min(6vh, 8vw);
+    }
+
+    .solo-mode .rv-m-time {
+      font-size: min(18vh, 16vw); /* An toàn hơn cho mobile solo */
+    }
+
+    .solo-mode .rv-m-status {
+      font-size: min(3.8vh, 5vw);
+      border-radius: 12px;
+    }
+
+    .solo-mode .rv-pen-total {
+      font-size: min(3.8vh, 5vw);
+    }
+
+    .rv-m-time.waiting {
+      opacity: 0.45;
+      font-size: min(12vh, 11vw);
+    }
+
+  </style>
+</head>
+
+<body>
+
+  <div class="display-wrapper">
+    <!-- HEADER -->
+    <div class="rv-header">
+      <div class="rv-title" id="display-title">KẾT QUẢ</div>
+      <div id="display-phase-hint" style="display:none; font-size:min(2vh,3vw); color:#fbbf24; font-weight:700; margin-top:0.5vh;">
+        ĐANG CHẠY…
+      </div>
+    </div>
+
+    <!-- LANES -->
+    <div class="rv-lanes-wrap" id="lanes-container">
+
+      <!-- LÀN 1 -->
+      <div class="rv-lane-m lane-1" id="lane-1">
+        <div class="rv-lane-tag">1</div>
+        <div class="rv-lane-info">
+          <div class="rv-m-name" id="l1-name">
+            VĐV A
+            <div class="racer-dob">Hồ Chí Minh</div>
+          </div>
+          <div class="rv-m-time waiting" id="l1-time">—<span class="rv-m-ms" id="l1-ms"></span></div>
+        </div>
+        <div class="rv-pen-wrap">
+          <div class="rv-pen-total" id="l1-pen" style="display:none;"></div>
+          <!-- 5 ô hiển thị Round -->
+          <div class="rv-round-indicator">
+            <span class="round-dot">1</span>
+            <span class="round-dot">2</span>
+            <span class="round-dot">3</span>
+            <span class="round-dot">4</span>
+            <span class="round-dot">5</span>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- LANE DIVIDER -->
+      <div class="rv-lane-sep"></div>
+
+      <!-- LÀN 2 -->
+      <div class="rv-lane-m lane-2" id="lane-2">
+        <div class="rv-lane-tag lane-2-tag">2</div>
+        <div class="rv-lane-info">
+          <div class="rv-m-name" id="l2-name">
+            VĐV B
+            <div class="racer-dob">Hồ Chí Minh</div>
+          </div>
+          <div class="rv-m-time waiting" id="l2-time">—<span class="rv-m-ms" id="l2-ms"></span></div>
+        </div>
+        <div class="rv-pen-wrap">
+          <div class="rv-pen-total" id="l2-pen" style="display:none;"></div>
+          <!-- 5 ô hiển thị Round -->
+          <div class="rv-round-indicator">
+            <span class="round-dot">1</span>
+            <span class="round-dot">2</span>
+            <span class="round-dot">3</span>
+            <span class="round-dot">4</span>
+            <span class="round-dot">5</span>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="display.js"></script>
+</body>
+
+</html>
