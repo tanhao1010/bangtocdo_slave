@@ -4,8 +4,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>ArenaFlow - MÀN HÌNH HIỂN THỊ</title>
-  <!-- Nhập CSS dùng chung của dự án để đảm bảo đồng bộ 100% giao diện và màu sắc -->
+  <title>ArenaFlow - M�N H�NH HI�N TH�</title>
+  <!-- Nh�p CSS d�ng chung c�a d� �n � �m b�o �ng b� 100% giao di�n v� m�u s�c -->
   <link rel="stylesheet" href="style2.css">
   <style>
     body,
@@ -26,7 +26,7 @@
       background: #1a2340;
     }
 
-    /* Tiêu đề chính giữa, to hơn, không chứa nút bấm */
+    /* Ti�u � ch�nh gi�a, to h�n, kh�ng ch�a n�t b�m */
     .rv-header {
       flex-direction: column;
       justify-content: center;
@@ -41,7 +41,7 @@
       text-align: center;
     }
 
-    /* Tối ưu hóa kích thước cho màn hình hiển thị rộng (TV, máy chiếu) */
+    /* T�i �u h�a k�ch th��c cho m�n h�nh hi�n th� r�ng (TV, m�y chi�u) */
     .rv-lanes-wrap {
       flex: 1;
       min-height: 0;
@@ -53,7 +53,7 @@
       justify-content: space-evenly;
     }
 
-    /* Tên VĐV & ngày sinh hiển thị lớn và rõ ràng */
+    /* T�n VV & ng�y sinh hi�n th� l�n v� r� r�ng */
     .rv-m-name {
       font-size: min(4.5vh, 6vw);
       font-weight: 900;
@@ -76,7 +76,7 @@
       color: #40f0b0;
     }
 
-    /* Thời gian chạy - Đã giảm nhỏ lại 1 chút để tránh bị chạm viền khi mở trên thiết bị hẹp (Mobile) */
+    /* Th�i gian ch�y - � gi�m nh� l�i 1 ch�t � tr�nh b� ch�m vi�n khi m� tr�n thi�t b� h�p (Mobile) */
     .rv-m-time {
       font-size: min(15vh, 14.5vw);
       margin: 3vh 0;
@@ -89,7 +89,7 @@
       color: inherit;
     }
 
-    /* Status badge đồng bộ góc bo tròn với Penalty */
+    /* Status badge �ng b� g�c bo tr�n v�i Penalty */
     .rv-m-status {
       font-size: min(2.6vh, 3.5vw);
       padding: 1vh 3vw;
@@ -101,7 +101,7 @@
       box-shadow: 0 0 20px rgba(255, 190, 30, 0.15);
     }
 
-    /* Nhãn hiển thị Penalty cố định (chỉ đọc, không có nút bấm chỉnh sửa) */
+    /* Nh�n hi�n th� Penalty c� �nh (ch� �c, kh�ng c� n�t b�m ch�nh s�a) */
     .rv-pen-wrap {
       padding: 2.2vh;
       background: rgba(15, 25, 55, 0.8);
@@ -121,7 +121,7 @@
       letter-spacing: 1px;
     }
 
-    /* CSS hiển thị các ô nhỏ Round Indicator (Chỉ cho chế độ hiển thị 2 line) */
+    /* CSS hi�n th� c�c � nh� Round Indicator (Ch� cho ch� � hi�n th� 2 line) */
     .rv-round-indicator {
       display: flex;
       gap: 1.2vh;
@@ -158,12 +158,12 @@
       color: rgba(190, 205, 225, 0.65);
     }
 
-    /* Ở chế độ 1 làn (Solo), tự động ẩn các ô hiển thị Round này */
+    /* � ch� � 1 l�n (Solo), t� �ng �n c�c � hi�n th� Round n�y */
     .solo-mode .rv-round-indicator {
       display: none !important;
     }
 
-    /* Hiển thị DQ nhấp nháy nổi bật */
+    /* Hi�n th� DQ nh�p nh�y n�i b�t */
     #l1-pen.dq,
     #l2-pen.dq {
       color: #ff4757;
@@ -182,13 +182,13 @@
       }
     }
 
-    /* Tự động tăng kích thước khi ở chế độ 1 làn (Solo) */
+    /* T� �ng tng k�ch th��c khi � ch� � 1 l�n (Solo) */
     .solo-mode .rv-m-name {
       font-size: min(6vh, 8vw);
     }
 
     .solo-mode .rv-m-time {
-      font-size: min(18vh, 16vw); /* An toàn hơn cho mobile solo */
+      font-size: min(18vh, 16vw); /* An to�n h�n cho mobile solo */
     }
 
     .solo-mode .rv-m-status {
@@ -213,28 +213,28 @@
   <div class="display-wrapper">
     <!-- HEADER -->
     <div class="rv-header">
-      <div class="rv-title" id="display-title">KẾT QUẢ</div>
+      <div class="rv-title" id="display-title">K�T QU�</div>
       <div id="display-phase-hint" style="display:none; font-size:min(2vh,3vw); color:#fbbf24; font-weight:700; margin-top:0.5vh;">
-        ĐANG CHẠY…
+        ANG CH�Y&
       </div>
     </div>
 
     <!-- LANES -->
     <div class="rv-lanes-wrap" id="lanes-container">
 
-      <!-- LÀN 1 -->
+      <!-- L�N 1 -->
       <div class="rv-lane-m lane-1" id="lane-1">
         <div class="rv-lane-tag">1</div>
         <div class="rv-lane-info">
           <div class="rv-m-name" id="l1-name">
-            VĐV A
-            <div class="racer-dob">Hồ Chí Minh</div>
+            VV A
+            <div class="racer-dob">H� Ch� Minh</div>
           </div>
-          <div class="rv-m-time waiting" id="l1-time">—<span class="rv-m-ms" id="l1-ms"></span></div>
+          <div class="rv-m-time waiting" id="l1-time"><span class="rv-m-ms" id="l1-ms"></span></div>
         </div>
         <div class="rv-pen-wrap">
           <div class="rv-pen-total" id="l1-pen" style="display:none;"></div>
-          <!-- 5 ô hiển thị Round -->
+          <!-- 5 � hi�n th� Round -->
           <div class="rv-round-indicator">
             <span class="round-dot">1</span>
             <span class="round-dot">2</span>
@@ -249,19 +249,19 @@
       <!-- LANE DIVIDER -->
       <div class="rv-lane-sep"></div>
 
-      <!-- LÀN 2 -->
+      <!-- L�N 2 -->
       <div class="rv-lane-m lane-2" id="lane-2">
         <div class="rv-lane-tag lane-2-tag">2</div>
         <div class="rv-lane-info">
           <div class="rv-m-name" id="l2-name">
-            VĐV B
-            <div class="racer-dob">Hồ Chí Minh</div>
+            VV B
+            <div class="racer-dob">H� Ch� Minh</div>
           </div>
-          <div class="rv-m-time waiting" id="l2-time">—<span class="rv-m-ms" id="l2-ms"></span></div>
+          <div class="rv-m-time waiting" id="l2-time"><span class="rv-m-ms" id="l2-ms"></span></div>
         </div>
         <div class="rv-pen-wrap">
           <div class="rv-pen-total" id="l2-pen" style="display:none;"></div>
-          <!-- 5 ô hiển thị Round -->
+          <!-- 5 � hi�n th� Round -->
           <div class="rv-round-indicator">
             <span class="round-dot">1</span>
             <span class="round-dot">2</span>

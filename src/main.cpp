@@ -21,7 +21,7 @@
 // ===================== OTA =====================
 const char *WIFI_SSID = "ATProSoft";
 const char *WIFI_PASSWORD = "ATPro1234560";
-const int FIRMWARE_VERSION = 35;
+const int FIRMWARE_VERSION = 37;
 
 // URL OTA tu dong khop voi build env (slave1 / slave2) qua MODBUS_SLAVE_ID.
 #define _STR(x) #x
@@ -38,15 +38,19 @@ const char *FIRMWARE_URL =
 #define NUM_ROWS 1
 #define NUM_COLS 1
 
-#define BUTTON_PIN 34
-#define DEBOUNCE_US 0
-// GPIO34 input-only, can ngoai tro keo len. MIN_RACE chong nhieu chan thoi gian
-// toi thieu de chap nhan trigger sau khi RUNNING.
-#define MIN_RACE_US 0LL
-
 #ifndef MODBUS_SLAVE_ID
 #define MODBUS_SLAVE_ID 1
 #endif
+
+#define BUTTON_PIN 34
+
+#if MODBUS_SLAVE_ID == 1
+#define DEBOUNCE_US 100 
+#else
+#define DEBOUNCE_US 20
+#endif
+
+#define MIN_RACE_US 20LL
 
 #define LORA_BAUD 115200 // E32 mac dinh 9600 8N1
 
@@ -120,6 +124,7 @@ void runSquareEffect(uint16_t color);
 void initFontMetrics();
 void clearScreen();
 void updateStateReg();
+bool readDebouncedButton();
 
 // Chi co 2 mau: XANH (1) va DO (2)
 uint16_t getColor(int id) {
@@ -127,14 +132,47 @@ uint16_t getColor(int id) {
 }
 
 // ===================== ISR =====================
-volatile bool btnPressed = false;
+volatile bool btnEdge = false;
 void IRAM_ATTR buttonISR() {
   int64_t now = esp_timer_get_time();
   static int64_t lastISR = 0;
   if ((now - lastISR) < DEBOUNCE_US)
     return;
   lastISR = now;
-  btnPressed = true;
+  btnEdge = true;
+}
+
+bool readDebouncedButton() {
+  static bool checking = false;
+  static bool armed = true;
+  static int64_t lowSince = 0;
+
+  if (digitalRead(BUTTON_PIN) == HIGH) {
+    checking = false;
+    armed = true;
+    btnEdge = false;
+    return false;
+  }
+
+  if (!armed)
+    return false;
+
+  if (btnEdge) {
+    btnEdge = false;
+    checking = true;
+    lowSince = esp_timer_get_time();
+  }
+
+  if (checking && (esp_timer_get_time() - lowSince) >= DEBOUNCE_US) {
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      checking = false;
+      armed = false;
+      return true;
+    }
+    checking = false;
+  }
+
+  return false;
 }
 
 // ===================== FONT =====================
@@ -272,7 +310,8 @@ void setup() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  // GPIO34 khong co pull-up noi tren ESP32, can dien tro keo len ngoai 3.3V.
+  pinMode(BUTTON_PIN, INPUT);
   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
 
   // CHU Y: tu day Serial chuyen sang LORA_BAUD cho Modbus.
@@ -433,8 +472,7 @@ void loop() {
     lastTarget = target; // tranh trigger nham khi quay lai mode 5
 
   // ---------- Nut bam ----------
-  if (btnPressed) {
-    btnPressed = false;
+  if (readDebouncedButton()) {
     int64_t now = esp_timer_get_time();
 
     if (mode == 1) {
