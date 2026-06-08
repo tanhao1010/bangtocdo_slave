@@ -21,7 +21,7 @@
 // ===================== OTA =====================
 const char *WIFI_SSID = "ATProSoft";
 const char *WIFI_PASSWORD = "ATPro1234560";
-const int FIRMWARE_VERSION = 37;
+const int FIRMWARE_VERSION = 39;
 
 // URL OTA tu dong khop voi build env (slave1 / slave2) qua MODBUS_SLAVE_ID.
 #define _STR(x) #x
@@ -67,6 +67,7 @@ enum ModbusHreg {
   HR_SYNC_FLAG = 8,   // co dong bo (du phong)
   HR_TARGET = 9,      // muc tieu giay (mode 3/4) hoac gia tri set (mode 5)
   HR_TRIG_FLAG = 10,  // 1 = slave da nhan nut, master xoa ve 0
+  HR_COUNT_DIR = 11,  // mode 5: 0=UP, 1=DW
   HR_COUNT = 12
 };
 
@@ -359,6 +360,7 @@ void loop() {
   static uint16_t lastSig = 0xFFFF;
   static uint16_t lastMode = 0xFFFF;
   static uint16_t lastTarget = 0xFFFF;
+  static uint16_t lastSyncFlag = 0xFFFF;
 
   // ---------- Doi MODE -> reset ----------
   if (mode != lastMode) {
@@ -366,6 +368,8 @@ void loop() {
     slaveState = ST_IDLE;
     tElapsed_us = 0;
     mode5Value = 0;
+    lastTarget = 0xFFFF;
+    lastSyncFlag = 0xFFFF;
     stateChanged = true;
     invalidateDisplay = true;
   }
@@ -444,6 +448,22 @@ void loop() {
     }
   }
 
+  if (sig == SIG_IDLE &&
+      (slaveState != ST_IDLE || tElapsed_us != 0 || mb.Hreg(HR_SEC) != 0 ||
+       mb.Hreg(HR_MS) != 0 || mb.Hreg(HR_TRIG_FLAG) != 0)) {
+    slaveState = ST_IDLE;
+    tElapsed_us = 0;
+    mb.Hreg(HR_SEC, 0);
+    mb.Hreg(HR_MS, 0);
+    mb.Hreg(HR_TRIG_FLAG, 0);
+    if (mode == 5) {
+      mode5Value = 0;
+      mb.Hreg(HR_TARGET, 0);
+    }
+    stateChanged = true;
+    invalidateDisplay = true;
+  }
+
   // ---------- Dong bo thoi gian tu master khi o trang thai STOPPED va tin hieu
   // la SIG_FINAL ----------
   if (sig == SIG_FINAL) {
@@ -463,9 +483,13 @@ void loop() {
   }
 
   // ---------- Mode 5: master ghi HR_TARGET de set so ----------
-  if (mode == 5 && target != lastTarget) {
+  uint16_t syncFlag = mb.Hreg(HR_SYNC_FLAG);
+  if (mode == 5 && (target != lastTarget || syncFlag != lastSyncFlag)) {
     lastTarget = target;
+    lastSyncFlag = syncFlag;
     mode5Value = (target > 9999) ? 9999 : target;
+    mb.Hreg(HR_SEC, (uint16_t)mode5Value);
+    mb.Hreg(HR_MS, 0);
     stateChanged = true;
   }
   if (mode != 5)
@@ -510,8 +534,12 @@ void loop() {
       static int64_t lastM5Press = -2000000LL;
       if ((now - lastM5Press) >= 1500000LL) {
         lastM5Press = now;
-        if (mode5Value < 9999)
+        if (mb.Hreg(HR_COUNT_DIR) == 1) {
+          if (mode5Value > 0)
+            mode5Value--;
+        } else if (mode5Value < 9999) {
           mode5Value++;
+        }
         mb.Hreg(HR_SEC, (uint16_t)mode5Value);
         stateChanged = true;
       }
@@ -644,12 +672,33 @@ void updateStateReg() {
   }
   mb.Hreg(HR_COUNT_STATE, st);
 
-  // Mode 2/6: slave dem -> ghi SEC/MS lien tuc de master doc realtime.
-  if ((mode == 2 || mode == 6) && slaveState == ST_RUNNING) {
-    int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
-    uint32_t elapsed_ms = (uint32_t)(cur / 1000);
-    mb.Hreg(HR_SEC, (uint16_t)(elapsed_ms / 1000));
-    mb.Hreg(HR_MS, (uint16_t)(elapsed_ms % 1000));
+  // Mode 2/3/4/6: slave ghi SEC/MS de master/web doc realtime.
+  if (mode == 2 || mode == 3 || mode == 4 || mode == 6) {
+    int64_t value_us = 0;
+    if (slaveState == ST_RUNNING) {
+      int64_t cur = (esp_timer_get_time() - tStart_us) + tElapsed_us;
+      if (mode == 3) {
+        value_us = tTarget_us - cur;
+        if (value_us < 0)
+          value_us = 0;
+      } else {
+        value_us = cur;
+      }
+    } else if (slaveState == ST_PAUSED || slaveState == ST_STOPPED) {
+      if (mode == 3) {
+        value_us = tTarget_us - tElapsed_us;
+        if (value_us < 0 || slaveState == ST_STOPPED)
+          value_us = 0;
+      } else {
+        value_us = tElapsed_us;
+      }
+    } else if (mode == 3) {
+      value_us = tTarget_us;
+    }
+
+    uint32_t value_ms = (uint32_t)(value_us / 1000);
+    mb.Hreg(HR_SEC, (uint16_t)(value_ms / 1000));
+    mb.Hreg(HR_MS, (uint16_t)(value_ms % 1000));
   }
 }
 

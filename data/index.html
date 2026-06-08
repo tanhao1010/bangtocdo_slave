@@ -59,6 +59,8 @@
       <div class="nav-status">
         <div class="status-dot"></div>
         <span>ESP32 Online</span>
+        <span id="slave1-status" class="slave-status">S1 --</span>
+        <span id="slave2-status" class="slave-status">S2 --</span>
       </div>
     </nav>
 
@@ -465,13 +467,19 @@
             <label>Tên giải đấu:</label>
             <input type="text" id="tournament-name" value="Giải đấu trượt Patin chuyên nghiệp">
           </div>
-          <div class="form-group">
-            <label>Chọn file CSV danh sách VĐV:</label>
-            <input type="file" id="csv-file" accept=".csv" onchange="app.processCSV()"
-              style="padding: 10px 0; border: none;">
-            <p style="font-size: 11px; color: var(--text-3); margin-top: 5px;">Định dạng: Tên, Ngày sinh, Tỉnh, SBD (VD:
-              Nguyen Van A, 20/05/2010, Hà Nội, 101)</p>
+          <div class="import-grid">
+            <div class="import-box">
+              <div class="import-title">File vòng loại</div>
+              <div class="import-desc">Dùng để chạy vòng loại 2 lượt và xuất bảng xếp hạng.</div>
+              <input type="file" id="csv-file" accept=".csv" onchange="app.processCSV('qualifying')">
+            </div>
+            <div class="import-box">
+              <div class="import-title">File vòng 1-16</div>
+              <div class="import-desc">Dùng riêng để tạo bracket. Lấy seed theo thứ tự file, không dùng lại file vòng loại.</div>
+              <input type="file" id="bracket-csv-file" accept=".csv" onchange="app.processCSV('bracket')">
+            </div>
           </div>
+          <p style="font-size: 11px; color: var(--text-3); margin-top: 5px;">Định dạng: Tên, Ngày sinh, Tỉnh, SBD. File vòng 1-16 có thể dùng CSV kết quả vòng loại đã sắp hạng.</p>
           <div id="csv-preview" class="hidden">
             <div
               style="display:flex; justify-content:space-between; align-items:center; margin: 15px 0; gap:8px; flex-wrap:wrap;">
@@ -620,18 +628,35 @@
 
           <div class="form-group">
             <label>Mục tiêu (giây, tối đa 9999):</label>
-            <input type="number" id="timer-target-input" min="0" max="9999" value="60"
-              style="font-size:20px;text-align:center;">
+            <div class="number-stepper">
+              <button onclick="app.adjustNumberInput('timer-target-input', -10, true)">-10</button>
+              <button onclick="app.adjustNumberInput('timer-target-input', -1, true)">-</button>
+              <input type="number" id="timer-target-input" min="0" max="9999" value="60"
+                onchange="app.clampNumberInput('timer-target-input', true)">
+              <button onclick="app.adjustNumberInput('timer-target-input', 1, true)">+</button>
+              <button onclick="app.adjustNumberInput('timer-target-input', 10, true)">+10</button>
+            </div>
+          </div>
+          <div class="slave-picker">
+            <button class="slave-pick selected" id="timer-pick-s1" onclick="app.toggleSlavePick('timer', 1)">
+              <input type="checkbox" id="timer-use-s1" checked>
+              <span class="slave-pick-dot"></span>
+              <span class="slave-pick-main">Slave 1</span>
+              <span class="slave-pick-sub" id="timer-pick-s1-sub">--</span>
+            </button>
+            <button class="slave-pick selected" id="timer-pick-s2" onclick="app.toggleSlavePick('timer', 2)">
+              <input type="checkbox" id="timer-use-s2" checked>
+              <span class="slave-pick-dot"></span>
+              <span class="slave-pick-main">Slave 2</span>
+              <span class="slave-pick-sub" id="timer-pick-s2-sub">--</span>
+            </button>
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;">
             <button class="btn-primary" style="background:#40c870;" onclick="app.timerStart()">▶ START</button>
             <button class="btn-primary" style="background:#ffb030;" onclick="app.timerPause()">⏸ PAUSE</button>
-            <button class="btn-primary" style="background:#40a0e0;" onclick="app.timerResume()">▶ RESUME</button>
-            <button class="btn-primary" style="background:#e04848;" onclick="app.timerStop()">■ STOP</button>
+            <button class="btn-primary" style="grid-column:1 / -1;background:#e04848;" onclick="app.timerReset()">↺ RESET</button>
           </div>
-          <button class="btn-primary" style="background:rgba(255,255,255,0.06);color:var(--text-2);margin-top:10px;"
-            onclick="app.timerReset()">↺ RESET</button>
         </div>
       </div>
     </div>
@@ -650,14 +675,39 @@
         <p style="font-size:11px;color:var(--text-3);text-align:center;margin-bottom:14px;">
           Mỗi lần kích cảm biến → +1. Tối đa 9999. Có thể ghi đè số bất kỳ.
         </p>
+        <div class="slave-picker">
+          <button class="slave-pick selected" id="counter-pick-s1" onclick="app.toggleSlavePick('counter', 1)">
+            <input type="checkbox" id="counter-use-s1" checked>
+            <span class="slave-pick-dot"></span>
+            <span class="slave-pick-main">Slave 1</span>
+            <span class="slave-pick-sub" id="counter-pick-s1-sub">--</span>
+          </button>
+          <button class="slave-pick selected" id="counter-pick-s2" onclick="app.toggleSlavePick('counter', 2)">
+            <input type="checkbox" id="counter-use-s2" checked>
+            <span class="slave-pick-dot"></span>
+            <span class="slave-pick-main">Slave 2</span>
+            <span class="slave-pick-sub" id="counter-pick-s2-sub">--</span>
+          </button>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           <!-- SLAVE 1 -->
           <div class="card" style="text-align:center;padding:14px;">
             <div style="font-size:11px;letter-spacing:2px;color:#50b0ff;margin-bottom:6px;">SLAVE 1</div>
+            <div id="cnt1-status" class="slave-card-status">--</div>
             <div id="cnt1-big"
               style="font-family:'JetBrains Mono',monospace;font-size:54px;font-weight:800;color:#a0e0ff;margin:8px 0;">
               00</div>
-            <input type="number" id="cnt1-input" min="0" max="9999" value="0" style="font-size:16px;text-align:center;">
+            <div class="counter-dir">
+              <button id="cnt1-up" class="counter-dir-btn active" onclick="app.counterSetDirection(1, 1)">UP</button>
+              <button id="cnt1-dw" class="counter-dir-btn" onclick="app.counterSetDirection(1, -1)">DW</button>
+            </div>
+            <div class="number-stepper compact">
+              <button onclick="app.adjustNumberInput('cnt1-input', -10)">-10</button>
+              <button onclick="app.adjustNumberInput('cnt1-input', -1)">-</button>
+              <input type="number" id="cnt1-input" min="0" max="9999" value="0" onchange="app.clampNumberInput('cnt1-input')">
+              <button onclick="app.adjustNumberInput('cnt1-input', 1)">+</button>
+              <button onclick="app.adjustNumberInput('cnt1-input', 10)">+10</button>
+            </div>
             <div style="display:flex;gap:6px;margin-top:8px;">
               <button class="btn-primary" style="flex:1;background:#40a0e0;padding:8px;font-size:11px;"
                 onclick="app.counterSet(1)">SET</button>
@@ -668,10 +718,21 @@
           <!-- SLAVE 2 -->
           <div class="card" style="text-align:center;padding:14px;">
             <div style="font-size:11px;letter-spacing:2px;color:#ff8050;margin-bottom:6px;">SLAVE 2</div>
+            <div id="cnt2-status" class="slave-card-status">--</div>
             <div id="cnt2-big"
               style="font-family:'JetBrains Mono',monospace;font-size:54px;font-weight:800;color:#ffa080;margin:8px 0;">
               00</div>
-            <input type="number" id="cnt2-input" min="0" max="9999" value="0" style="font-size:16px;text-align:center;">
+            <div class="counter-dir">
+              <button id="cnt2-up" class="counter-dir-btn active" onclick="app.counterSetDirection(2, 1)">UP</button>
+              <button id="cnt2-dw" class="counter-dir-btn" onclick="app.counterSetDirection(2, -1)">DW</button>
+            </div>
+            <div class="number-stepper compact">
+              <button onclick="app.adjustNumberInput('cnt2-input', -10)">-10</button>
+              <button onclick="app.adjustNumberInput('cnt2-input', -1)">-</button>
+              <input type="number" id="cnt2-input" min="0" max="9999" value="0" onchange="app.clampNumberInput('cnt2-input')">
+              <button onclick="app.adjustNumberInput('cnt2-input', 1)">+</button>
+              <button onclick="app.adjustNumberInput('cnt2-input', 10)">+10</button>
+            </div>
             <div style="display:flex;gap:6px;margin-top:8px;">
               <button class="btn-primary" style="flex:1;background:#40a0e0;padding:8px;font-size:11px;"
                 onclick="app.counterSet(2)">SET</button>
