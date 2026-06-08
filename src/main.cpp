@@ -21,7 +21,7 @@
 // ===================== OTA =====================
 const char *WIFI_SSID = "ATProSoft";
 const char *WIFI_PASSWORD = "ATPro1234560";
-const int FIRMWARE_VERSION = 39;
+const int FIRMWARE_VERSION = 51;
 
 // URL OTA tu dong khop voi build env (slave1 / slave2) qua MODBUS_SLAVE_ID.
 #define _STR(x) #x
@@ -45,7 +45,7 @@ const char *FIRMWARE_URL =
 #define BUTTON_PIN 34
 
 #if MODBUS_SLAVE_ID == 1
-#define DEBOUNCE_US 100 
+#define DEBOUNCE_US 20
 #else
 #define DEBOUNCE_US 20
 #endif
@@ -210,7 +210,7 @@ void initFontMetrics() {
   textH9 = h + 2;
   textYoff9 = y1 - 1;
 }
-
+// dung 7.5 anh 5.8, dung 2.9 anh 5.3
 // ===================== OTA =====================
 void connectWiFi() {
   Serial.printf("Ket noi WiFi: %s\n", WIFI_SSID);

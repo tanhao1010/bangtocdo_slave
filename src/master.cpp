@@ -29,10 +29,6 @@
 #define I2S_DOUT 33
 #define I2S_PORT I2S_NUM_0
 
-static volatile bool startCancelRequested = false;
-static volatile bool startTaskRunning = false;
-TaskHandle_t startTaskHandle = nullptr;
-
 void setupI2S() {
   i2s_config_t i2s_config = {.mode =
                                  (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -55,40 +51,34 @@ void setupI2S() {
   i2s_zero_dma_buffer(I2S_PORT);
 }
 
-// Phat 1 file WAV (16kHz/16bit mono) tu LittleFS. Tra false neu bi STOP/RESET
-// huy giua intro.
-bool playWav(const char *path) {
+// Phat 1 file WAV (16kHz/16bit mono) tu LittleFS. Blocking cho den khi phat
+// xong.
+void playWav(const char *path) {
   File wavFile = LittleFS.open(path, "r");
   if (!wavFile) {
     Serial.printf("Khong mo duoc WAV: %s\n", path);
-    return false;
+    return;
   }
   wavFile.seek(44); // bo qua header WAV 44 byte
   uint8_t buffer[1024];
   size_t bytesRead, bytesWritten;
   while (wavFile.available()) {
-    if (startCancelRequested) {
-      wavFile.close();
-      i2s_zero_dma_buffer(I2S_PORT);
-      return false;
-    }
     bytesRead = wavFile.read(buffer, sizeof(buffer));
     i2s_write(I2S_PORT, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
   }
   wavFile.close();
-  return !startCancelRequested;
 }
 
-bool cancelStartTask(uint32_t waitMs = 1200) {
-  if (!startTaskRunning)
-    return true;
-  startCancelRequested = true;
-  i2s_zero_dma_buffer(I2S_PORT);
-  uint32_t t0 = millis();
-  while (startTaskRunning && millis() - t0 < waitMs)
-    delay(10);
-  return !startTaskRunning;
-}
+enum StartFlowAction : uint8_t {
+  START_FLOW_CONTINUE = 0,
+  START_FLOW_CANCEL = 1,
+  START_FLOW_RESTART = 2
+};
+
+static volatile bool startCancelRequested = false;
+static volatile bool startRestartRequested = false;
+static volatile bool startTaskRunning = false;
+TaskHandle_t startTaskHandle = nullptr;
 
 // ---------- Slave IDs ----------
 #define SLAVE1_ID 1
@@ -135,9 +125,7 @@ volatile uint8_t currentMode = 1;
 volatile uint16_t targetSec = 10;
 volatile uint16_t colorSlave1 = 1;
 volatile uint16_t colorSlave2 = 2;
-volatile uint16_t syncSlave1 = 0;
-volatile uint16_t syncSlave2 = 0;
-volatile uint8_t activeSlaveMask = 0x03; // bit0=slave1, bit1=slave2
+volatile uint8_t activeSlaveMask = 3; // bit0=slave1, bit1=slave2
 
 // Dung milliseconds (uint32) thay vi int64 us -> read atomic, an toan
 // cross-task.
@@ -310,19 +298,6 @@ bool writeBoth(uint16_t addr, uint16_t value) {
   return a && b;
 }
 
-bool slaveSelected(uint8_t id) {
-  return (activeSlaveMask & (id == SLAVE1_ID ? 0x01 : 0x02)) != 0;
-}
-
-bool writeSelected(uint16_t addr, uint16_t value) {
-  bool ok = true;
-  if (slaveSelected(SLAVE1_ID))
-    ok = writeReg(SLAVE1_ID, addr, value) && ok;
-  if (slaveSelected(SLAVE2_ID))
-    ok = writeReg(SLAVE2_ID, addr, value) && ok;
-  return ok;
-}
-
 // Broadcast Modbus (slaveId = 0): CA 2 slave nhan CUNG 1 frame, khong ai reply.
 // -> ghi 1 lan duy nhat thay vi 2 lan tuan tu, nen 2 slave start/pause dong
 // thoi,
@@ -386,13 +361,19 @@ bool writeRegsBoth(uint16_t addr, uint16_t *valueArr, uint16_t count) {
   return a && b;
 }
 
-bool writeRegsSelected(uint16_t addr, uint16_t *valueArr, uint16_t count) {
+bool writeRegsMask(uint8_t mask, uint16_t addr, uint16_t *valueArr,
+                   uint16_t count) {
+  bool wrote = false;
   bool ok = true;
-  if (slaveSelected(SLAVE1_ID))
+  if (mask & 1) {
+    wrote = true;
     ok = writeRegs(SLAVE1_ID, addr, valueArr, count) && ok;
-  if (slaveSelected(SLAVE2_ID))
+  }
+  if (mask & 2) {
+    wrote = true;
     ok = writeRegs(SLAVE2_ID, addr, valueArr, count) && ok;
-  return ok;
+  }
+  return wrote && ok;
 }
 
 bool writeRegsBroadcast(uint16_t addr, uint16_t *valueArr, uint16_t count) {
@@ -412,25 +393,43 @@ bool writeRegsBroadcast(uint16_t addr, uint16_t *valueArr, uint16_t count) {
 
 // ---------- Helpers cao cap ----------
 void sendSigBoth(uint16_t sig) { writeBoth(HR_MASTER_SIG, sig); }
-void sendSigSelected(uint16_t sig) { writeSelected(HR_MASTER_SIG, sig); }
+void sendSigMask(uint8_t mask, uint16_t sig) {
+  if (mask & 1)
+    writeReg(SLAVE1_ID, HR_MASTER_SIG, sig);
+  if (mask & 2)
+    writeReg(SLAVE2_ID, HR_MASTER_SIG, sig);
+}
 // Gui tin hieu cho ca 2 slave cung luc bang broadcast (dung trong mode 2).
 void sendSigBroadcast(uint16_t sig) { writeBroadcast(HR_MASTER_SIG, sig); }
 
-void pushCounterValue(uint8_t slaveId, uint16_t value) {
-  uint16_t sync = (slaveId == SLAVE1_ID) ? ++syncSlave1 : ++syncSlave2;
-  uint16_t regs[3];
-  regs[0] = value; // HR_SEC: gia tri counter de master/web doc ngay
-  regs[1] = 0;     // HR_MS
-  regs[2] = 0;     // HR_COUNT_STATE
-  writeRegs(slaveId, HR_SEC, regs, 3);
-  writeReg(slaveId, HR_TARGET, value);
-  writeReg(slaveId, HR_SYNC_FLAG, sync);
+uint8_t normalizedActiveMask() {
+  uint8_t mask = activeSlaveMask & 0x03;
+  return mask ? mask : 1;
+}
 
-  SlaveCache &cache = (slaveId == SLAVE1_ID) ? cache1 : cache2;
-  cache.sec = value;
-  cache.ms = 0;
-  cache.state = 0;
-  cache.value = value;
+bool modeUsesActiveMask() {
+  return currentMode == 3 || currentMode == 4 || currentMode == 5;
+}
+
+void writeActive(uint16_t addr, uint16_t value) {
+  uint8_t mask = normalizedActiveMask();
+  if (mask & 1)
+    writeReg(SLAVE1_ID, addr, value);
+  if (mask & 2)
+    writeReg(SLAVE2_ID, addr, value);
+}
+
+void idleInactiveSlaves() {
+  uint8_t mask = normalizedActiveMask();
+  uint16_t regs[4];
+  regs[0] = 0;
+  regs[1] = 0;
+  regs[2] = 0;
+  regs[3] = SIG_IDLE;
+  if (!(mask & 1))
+    writeRegs(SLAVE1_ID, HR_SEC, regs, 4);
+  if (!(mask & 2))
+    writeRegs(SLAVE2_ID, HR_SEC, regs, 4);
 }
 
 void pushModeAndColors() {
@@ -442,25 +441,10 @@ void pushModeAndColors() {
   }
   writeReg(SLAVE2_ID, HR_COLOR_READY, colorSlave2);
   writeReg(SLAVE2_ID, HR_COLOR_STOP, colorSlave2);
-  writeBoth(HR_MODE, currentMode);
-}
-
-void idleInactiveSlavesForUtilityMode() {
-  uint16_t regs[4] = {0, 0, 0, SIG_IDLE};
-  if (slaveSelected(SLAVE1_ID)) {
-    writeReg(SLAVE1_ID, HR_MODE, currentMode);
-  } else {
-    writeRegs(SLAVE1_ID, HR_SEC, regs, 4);
-    writeReg(SLAVE1_ID, HR_MODE, 1);
-  }
-  if (currentMode == 6)
-    return;
-  if (slaveSelected(SLAVE2_ID)) {
-    writeReg(SLAVE2_ID, HR_MODE, currentMode);
-  } else {
-    writeRegs(SLAVE2_ID, HR_SEC, regs, 4);
-    writeReg(SLAVE2_ID, HR_MODE, 1);
-  }
+  if (modeUsesActiveMask())
+    writeActive(HR_MODE, currentMode);
+  else
+    writeBoth(HR_MODE, currentMode);
 }
 
 // Reset sach toan bo trang thai dua (state, timer, winner, co am thanh, cache
@@ -491,14 +475,17 @@ void setMode(uint8_t m) {
   regs[3] = SIG_IDLE; // HR_MASTER_SIG
   if (currentMode == 6)
     writeRegs(SLAVE1_ID, HR_SEC, regs, 4);
-  else
+  else if (modeUsesActiveMask()) {
+    writeRegsMask(normalizedActiveMask(), HR_SEC, regs, 4);
+    idleInactiveSlaves();
+  } else
     writeRegsBoth(HR_SEC, regs, 4);
 }
 
 void armCurrent() {
   pushModeAndColors();
   if (currentMode == 3 || currentMode == 4)
-    writeSelected(HR_TARGET, targetSec);
+    writeActive(HR_TARGET, targetSec);
 
   uint16_t regs[4];
   regs[0] = 0;       // HR_SEC
@@ -507,12 +494,10 @@ void armCurrent() {
   regs[3] = SIG_ARM; // HR_MASTER_SIG
   if (currentMode == 6)
     writeRegs(SLAVE1_ID, HR_SEC, regs, 4);
-  else if (currentMode == 3 || currentMode == 4 || currentMode == 5)
-    writeRegsSelected(HR_SEC, regs, 4);
+  else if (modeUsesActiveMask())
+    writeRegsMask(normalizedActiveMask(), HR_SEC, regs, 4);
   else
     writeRegsBoth(HR_SEC, regs, 4);
-  if (currentMode == 3 || currentMode == 4 || currentMode == 5)
-    idleInactiveSlavesForUtilityMode();
 
   mState = M_ARMED;
   tStart_ms = tElapsed_ms = 0;
@@ -574,8 +559,6 @@ bool checkFalseStartMode2() {
 bool waitIntro(uint32_t ms, uint8_t mode) {
   uint32_t start = millis();
   while (millis() - start < ms) {
-    if (startCancelRequested)
-      return false;
     if (mode == 1 && checkFalseStartMode1())
       return false;
     if (mode == 2 && checkFalseStartMode2())
@@ -585,36 +568,64 @@ bool waitIntro(uint32_t ms, uint8_t mode) {
   return true;
 }
 
-bool cancelableDelay(uint32_t ms) {
-  uint32_t start = millis();
-  while (millis() - start < ms) {
-    if (startCancelRequested)
-      return false;
-    delay(10);
+StartFlowAction checkStartFlowControl() {
+  if (startCancelRequested) {
+    startCancelRequested = false;
+    startRestartRequested = false;
+    i2s_zero_dma_buffer(I2S_PORT);
+    return START_FLOW_CANCEL;
   }
-  return true;
+  if (startRestartRequested) {
+    startRestartRequested = false;
+    i2s_zero_dma_buffer(I2S_PORT);
+    return START_FLOW_RESTART;
+  }
+  return START_FLOW_CONTINUE;
 }
 
-void startCurrent() {
-  startCancelRequested = false;
+StartFlowAction playIntroWav(const char *path) {
+  playWav(path);
+  return checkStartFlowControl();
+}
+
+StartFlowAction waitIntroControlled(uint32_t ms, uint8_t mode) {
+  uint32_t start = millis();
+  while (millis() - start < ms) {
+    StartFlowAction action = checkStartFlowControl();
+    if (action != START_FLOW_CONTINUE)
+      return action;
+    if (mode == 1 && checkFalseStartMode1())
+      return START_FLOW_CANCEL;
+    if (mode == 2 && checkFalseStartMode2())
+      return START_FLOW_CANCEL;
+    delay(10);
+  }
+  return checkStartFlowControl();
+}
+
+StartFlowAction startCurrent() {
   if (currentMode == 1) {
     // --- Hieu ung am thanh intro ---
     // teng -> nghi 1s -> onyourmask -> nghi 3s -> ready (dong thoi bao slave
     // dem xuong)
-    if (!playWav("/teng.wav"))
-      return;
+    StartFlowAction action = playIntroWav("/teng.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     if (checkFalseStartMode1())
-      return;
-    if (!waitIntro(1000, 1))
-      return;
-    if (!playWav("/onyourmask.wav"))
-      return;
+      return START_FLOW_CANCEL;
+    action = waitIntroControlled(1000, 1);
+    if (action != START_FLOW_CONTINUE)
+      return action;
+    action = playIntroWav("/onyourmask.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     if (checkFalseStartMode1())
-      return;
-    if (!waitIntro(3000, 1))
-      return;
+      return START_FLOW_CANCEL;
+    action = waitIntroControlled(3000, 1);
+    if (action != START_FLOW_CONTINUE)
+      return action;
     if (checkFalseStartMode1())
-      return;
+      return START_FLOW_CANCEL;
     // Ready: bao 2 slave bat dau dem xuong (ve hinh vuong)
     uint16_t regs[4];
     regs[0] = 0;         // HR_SEC
@@ -625,40 +636,45 @@ void startCurrent() {
 
     writeReg(SLAVE1_ID, HR_TRIG_FLAG, 0);
     writeReg(SLAVE2_ID, HR_TRIG_FLAG, 0);
-    if (!playWav("/ready.wav"))
-      return;
-    if (startCancelRequested)
-      return;
+    action = playIntroWav("/ready.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     mState = M_ARMED;
     tStart_ms = tElapsed_ms = 0;
     mode1ArmMs = millis();
     mode1BepPlayed = false;
-    return;
+    return START_FLOW_CONTINUE;
   }
   if (currentMode == 2) {
     // --- Hieu ung am thanh intro mode 2 ---
     // teng -> nghi 1s -> onyourmask -> nghi 3s -> set -> nghi 5s -> sung (bat
     // dau)
-    if (!playWav("/teng.wav"))
-      return;
+    StartFlowAction action = playIntroWav("/teng.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     if (checkFalseStartMode2())
-      return;
-    if (!waitIntro(1000, 2))
-      return;
-    if (!playWav("/onyourmask.wav"))
-      return;
+      return START_FLOW_CANCEL;
+    action = waitIntroControlled(1000, 2);
+    if (action != START_FLOW_CONTINUE)
+      return action;
+    action = playIntroWav("/onyourmask.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     if (checkFalseStartMode2())
-      return;
-    if (!waitIntro(3000, 2))
-      return;
-    if (!playWav("/set.wav"))
-      return;
+      return START_FLOW_CANCEL;
+    action = waitIntroControlled(3000, 2);
+    if (action != START_FLOW_CONTINUE)
+      return action;
+    action = playIntroWav("/set.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     if (checkFalseStartMode2())
-      return;
-    if (!waitIntro(5000, 2))
-      return;
+      return START_FLOW_CANCEL;
+    action = waitIntroControlled(5000, 2);
+    if (action != START_FLOW_CONTINUE)
+      return action;
     if (checkFalseStartMode2())
-      return;
+      return START_FLOW_CANCEL;
     // Sung: broadcast 1 frame duy nhat -> CA 2 slave bat dau dem CUNG LUC
     uint16_t regs[4];
     regs[0] = 0;         // HR_SEC
@@ -669,41 +685,45 @@ void startCurrent() {
 
     cache1.state = 0;
     cache2.state = 0;
-    if (!playWav("/sung.wav"))
-      return;
-    if (startCancelRequested)
-      return;
+    action = playIntroWav("/sung.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     mState = M_RUNNING;
     tStart_ms = tElapsed_ms = 0;
     mode2Winner = 0;
-    return;
+    return START_FLOW_CONTINUE;
   }
   if (currentMode == 3 || currentMode == 4) {
-    writeSelected(HR_TARGET, targetSec);
-
     uint16_t regs[4];
     regs[0] = 0;         // HR_SEC
     regs[1] = 0;         // HR_MS
     regs[2] = 100;       // HR_COUNT_STATE (RUNNING)
     regs[3] = SIG_START; // HR_MASTER_SIG
-    writeRegsSelected(HR_SEC, regs, 4);
-    idleInactiveSlavesForUtilityMode();
+    uint8_t mask = normalizedActiveMask();
+    if (mask == 0x03)
+      writeRegsBroadcast(HR_SEC, regs, 4);
+    else
+      writeRegsMask(mask, HR_SEC, regs, 4);
 
     mState = M_RUNNING;
     tStart_ms = tElapsed_ms = 0;
+    return START_FLOW_CONTINUE;
   }
   if (currentMode == 6) {
-    writeReg(SLAVE1_ID, HR_TRIG_FLAG, 0);
     // Time lapse dung hieu lenh giong dau don:
     // teng -> nghi 1s -> onyourmask -> nghi 3s -> ready, roi cho cam bien dau.
-    if (!playWav("/teng.wav"))
-      return;
-    if (!cancelableDelay(1000))
-      return;
-    if (!playWav("/onyourmask.wav"))
-      return;
-    if (!cancelableDelay(3000))
-      return;
+    StartFlowAction action = playIntroWav("/teng.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
+    action = waitIntroControlled(1000, 6);
+    if (action != START_FLOW_CONTINUE)
+      return action;
+    action = playIntroWav("/onyourmask.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
+    action = waitIntroControlled(3000, 6);
+    if (action != START_FLOW_CONTINUE)
+      return action;
 
     uint16_t runRegs[4];
     runRegs[0] = 0;         // HR_SEC
@@ -713,15 +733,16 @@ void startCurrent() {
     writeRegs(SLAVE1_ID, HR_SEC, runRegs, 4);
 
     writeReg(SLAVE1_ID, HR_TRIG_FLAG, 0);
-    if (!playWav("/ready.wav"))
-      return;
-    if (startCancelRequested)
-      return;
+    action = playIntroWav("/ready.wav");
+    if (action != START_FLOW_CONTINUE)
+      return action;
     mState = M_ARMED;
     tStart_ms = tElapsed_ms = 0;
     timeLapseSeq = 0;
     timeLapseLastMs = 0;
+    return START_FLOW_CONTINUE;
   }
+  return START_FLOW_CONTINUE;
 }
 
 void pauseCurrent() {
@@ -732,8 +753,8 @@ void pauseCurrent() {
     sendSigBroadcast(SIG_PAUSE);
   else if (currentMode == 6)
     writeReg(SLAVE1_ID, HR_MASTER_SIG, SIG_PAUSE);
-  else if (currentMode == 3 || currentMode == 4 || currentMode == 5)
-    sendSigSelected(SIG_PAUSE);
+  else if (modeUsesActiveMask())
+    sendSigMask(normalizedActiveMask(), SIG_PAUSE);
   else
     sendSigBoth(SIG_PAUSE);
   if (currentMode == 1)
@@ -749,8 +770,8 @@ void resumeCurrent() {
     sendSigBroadcast(SIG_RESUME);
   else if (currentMode == 6)
     writeReg(SLAVE1_ID, HR_MASTER_SIG, SIG_RESUME);
-  else if (currentMode == 3 || currentMode == 4 || currentMode == 5)
-    sendSigSelected(SIG_RESUME);
+  else if (modeUsesActiveMask())
+    sendSigMask(normalizedActiveMask(), SIG_RESUME);
   else
     sendSigBoth(SIG_RESUME);
   if (currentMode == 1)
@@ -791,8 +812,8 @@ void stopCurrent() {
       regs[3] = SIG_IDLE; // HR_MASTER_SIG
       if (currentMode == 6)
         writeRegs(SLAVE1_ID, HR_SEC, regs, 4);
-      else if (currentMode == 3 || currentMode == 4 || currentMode == 5)
-        writeRegsSelected(HR_SEC, regs, 4);
+      else if (modeUsesActiveMask())
+        writeRegsMask(normalizedActiveMask(), HR_SEC, regs, 4);
       else
         writeRegsBoth(HR_SEC, regs, 4);
       mState = M_IDLE;
@@ -805,15 +826,6 @@ void stopCurrent() {
 void resetAll() {
   clearRaceState();
 
-  if (currentMode == 5) {
-    if (slaveSelected(SLAVE1_ID))
-      pushCounterValue(SLAVE1_ID, 0);
-    if (slaveSelected(SLAVE2_ID))
-      pushCounterValue(SLAVE2_ID, 0);
-    sendSigSelected(SIG_IDLE);
-    return;
-  }
-
   uint16_t regs[4];
   regs[0] = 0;        // HR_SEC
   regs[1] = 0;        // HR_MS
@@ -821,8 +833,8 @@ void resetAll() {
   regs[3] = SIG_IDLE; // HR_MASTER_SIG
   if (currentMode == 6)
     writeRegs(SLAVE1_ID, HR_SEC, regs, 4);
-  else if (currentMode == 3 || currentMode == 4)
-    writeRegsSelected(HR_SEC, regs, 4);
+  else if (modeUsesActiveMask())
+    writeRegsMask(normalizedActiveMask(), HR_SEC, regs, 4);
   else
     writeRegsBoth(HR_SEC, regs, 4);
 }
@@ -897,9 +909,18 @@ void tickMode34() {
   if (mState != M_RUNNING)
     return;
   uint16_t st1 = 0, st2 = 0;
-  bool ok1 = readReg(SLAVE1_ID, HR_COUNT_STATE, st1);
-  bool ok2 = readReg(SLAVE2_ID, HR_COUNT_STATE, st2);
-  if (ok1 && ok2 && st1 == 200 && st2 == 200) {
+  uint8_t mask = normalizedActiveMask();
+  bool s1Done = true;
+  bool s2Done = true;
+  if (mask & 1) {
+    bool ok1 = readReg(SLAVE1_ID, HR_COUNT_STATE, st1);
+    s1Done = (!link1.online) || (ok1 && st1 == 200);
+  }
+  if (mask & 2) {
+    bool ok2 = readReg(SLAVE2_ID, HR_COUNT_STATE, st2);
+    s2Done = (!link2.online) || (ok2 && st2 == 200);
+  }
+  if (s1Done && s2Done) {
     mState = M_FINISHED;
   }
 }
@@ -922,6 +943,7 @@ void tickMode6() {
 
     if (mState == M_ARMED) {
       mState = M_RUNNING; // first sensor cut starts the timer
+      playWav("/sung.wav");
     } else {
       if (timeLapseSeq < 65535)
         timeLapseSeq++;
@@ -972,6 +994,42 @@ void apiErr(const char *msg) {
   server.send(400, "application/json", s);
 }
 
+void startTaskFn(void * /*param*/) {
+  while (true) {
+    StartFlowAction result = startCurrent();
+    if (result != START_FLOW_RESTART)
+      break;
+  }
+  startCancelRequested = false;
+  startRestartRequested = false;
+  startTaskRunning = false;
+  startTaskHandle = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void requestStartCurrent() {
+  if (startTaskRunning) {
+    startCancelRequested = false;
+    startRestartRequested = true;
+    return;
+  }
+
+  startCancelRequested = false;
+  startRestartRequested = false;
+  startTaskRunning = true;
+  BaseType_t ok = xTaskCreatePinnedToCore(startTaskFn, "startCurrent", 8192,
+                                          nullptr, 1, &startTaskHandle, 1);
+  if (ok != pdPASS) {
+    startTaskHandle = nullptr;
+    while (startCurrent() == START_FLOW_RESTART) {
+      delay(1);
+    }
+    startTaskRunning = false;
+    startCancelRequested = false;
+    startRestartRequested = false;
+  }
+}
+
 void apiStatus() {
   StaticJsonDocument<768> doc;
   doc["mode"] = (uint8_t)currentMode;
@@ -979,7 +1037,7 @@ void apiStatus() {
   doc["target"] = (uint16_t)targetSec;
   doc["colorSlave1"] = (uint16_t)colorSlave1;
   doc["colorSlave2"] = (uint16_t)colorSlave2;
-  doc["activeSlaveMask"] = (uint8_t)activeSlaveMask;
+  doc["activeSlaveMask"] = (uint8_t)normalizedActiveMask();
   doc["winner"] = (uint8_t)mode2Winner;
 
   // Mode 1: master dem -> masterMs la thoi gian chinh.
@@ -1031,30 +1089,17 @@ void apiArm() {
   armCurrent();
   apiOk();
 }
-
-void startTaskFn(void * /*param*/) {
-  startCurrent();
-  startTaskRunning = false;
-  startTaskHandle = nullptr;
-  vTaskDelete(nullptr);
-}
-
 void apiStart() {
-  if (!startTaskRunning) {
-    startCancelRequested = false;
-    startTaskRunning = true;
-    BaseType_t ok = xTaskCreatePinnedToCore(startTaskFn, "startCurrent", 8192,
-                                            nullptr, 1, &startTaskHandle, 1);
-    if (ok != pdPASS) {
-      startTaskHandle = nullptr;
-      startTaskRunning = false;
-      startCurrent();
-    }
-  }
+  requestStartCurrent();
   apiOk();
 }
 void apiPause() {
-  pauseCurrent();
+  startCancelRequested = true;
+  startRestartRequested = false;
+  if (startTaskRunning && mState != M_RUNNING)
+    resetAll();
+  else
+    pauseCurrent();
   apiOk();
 }
 void apiResume() {
@@ -1063,6 +1108,7 @@ void apiResume() {
 }
 void apiStop() {
   startCancelRequested = true;
+  startRestartRequested = false;
   if (startTaskRunning || mState == M_ARMED)
     resetAll();
   else
@@ -1071,6 +1117,7 @@ void apiStop() {
 }
 void apiReset() {
   startCancelRequested = true;
+  startRestartRequested = false;
   resetAll();
   apiOk();
 }
@@ -1086,7 +1133,43 @@ void apiTarget() {
   if (n > 9999)
     n = 9999;
   targetSec = (uint16_t)n;
-  writeSelected(HR_TARGET, targetSec);
+  if (modeUsesActiveMask())
+    writeActive(HR_TARGET, targetSec);
+  else
+    writeBoth(HR_TARGET, targetSec);
+  apiOk();
+}
+
+void apiSlaveMask() {
+  if (!server.hasArg("mask")) {
+    apiErr("missing mask");
+    return;
+  }
+  int mask = server.arg("mask").toInt() & 0x03;
+  if (mask == 0)
+    mask = 1;
+  activeSlaveMask = (uint8_t)mask;
+
+  if (modeUsesActiveMask()) {
+    pushModeAndColors();
+    writeActive(HR_TARGET, targetSec);
+    idleInactiveSlaves();
+  }
+  apiOk();
+}
+
+void apiCountDir() {
+  if (!server.hasArg("slave") || !server.hasArg("dir")) {
+    apiErr("missing slave/dir");
+    return;
+  }
+  int sl = server.arg("slave").toInt();
+  int dir = server.arg("dir").toInt();
+  if (sl != 1 && sl != 2) {
+    apiErr("slave 1|2");
+    return;
+  }
+  writeReg((uint8_t)sl, HR_COUNT_DIR, dir < 0 ? 1 : 0);
   apiOk();
 }
 
@@ -1105,39 +1188,9 @@ void apiSet() {
     n = 0;
   if (n > 9999)
     n = 9999;
-  pushCounterValue((uint8_t)sl, (uint16_t)n);
-  apiOk();
-}
-
-void apiSlaveMask() {
-  int mask = 0;
-  if (server.hasArg("mask")) {
-    mask = server.arg("mask").toInt();
-  } else {
-    bool s1 = !server.hasArg("s1") || server.arg("s1").toInt() != 0;
-    bool s2 = !server.hasArg("s2") || server.arg("s2").toInt() != 0;
-    mask = (s1 ? 0x01 : 0) | (s2 ? 0x02 : 0);
-  }
-  mask &= 0x03;
-  if (mask == 0)
-    mask = 0x01;
-  activeSlaveMask = (uint8_t)mask;
-  idleInactiveSlavesForUtilityMode();
-  apiOk();
-}
-
-void apiCountDir() {
-  if (!server.hasArg("slave") || !server.hasArg("dir")) {
-    apiErr("missing slave/dir");
-    return;
-  }
-  int sl = server.arg("slave").toInt();
-  int dir = server.arg("dir").toInt();
-  if (sl != 1 && sl != 2) {
-    apiErr("slave 1|2");
-    return;
-  }
-  writeReg((uint8_t)sl, HR_COUNT_DIR, dir < 0 ? 1 : 0);
+  uint8_t id = (uint8_t)sl;
+  writeReg(id, HR_TARGET, (uint16_t)n);
+  writeReg(id, HR_SYNC_FLAG, (uint16_t)(millis() & 0xFFFF));
   apiOk();
 }
 
@@ -1252,6 +1305,8 @@ void apiDelCsv() {
     LittleFS.remove("/ket_qua_vong_loai.csv");
   if (LittleFS.exists("/ket_qua_luot1.csv"))
     LittleFS.remove("/ket_qua_luot1.csv");
+  if (LittleFS.exists("/ket_qua_luot2.csv"))
+    LittleFS.remove("/ket_qua_luot2.csv");
   if (LittleFS.exists("/ket_qua_bracket.csv"))
     LittleFS.remove("/ket_qua_bracket.csv");
   if (LittleFS.exists("/state.json"))
@@ -1431,12 +1486,17 @@ void handleLine(String line) {
     return;
   }
   if (line == "start") {
-    startCurrent();
+    requestStartCurrent();
     Serial.println("START");
     return;
   }
   if (line == "pause") {
-    pauseCurrent();
+    startCancelRequested = true;
+    startRestartRequested = false;
+    if (startTaskRunning && mState != M_RUNNING)
+      resetAll();
+    else
+      pauseCurrent();
     Serial.println("PAUSE");
     return;
   }
@@ -1446,11 +1506,18 @@ void handleLine(String line) {
     return;
   }
   if (line == "stop") {
-    stopCurrent();
+    startCancelRequested = true;
+    startRestartRequested = false;
+    if (startTaskRunning || mState == M_ARMED)
+      resetAll();
+    else
+      stopCurrent();
     Serial.println("STOP");
     return;
   }
   if (line == "reset") {
+    startCancelRequested = true;
+    startRestartRequested = false;
     resetAll();
     Serial.println("RESET");
     return;
@@ -1531,12 +1598,12 @@ void setupRoutes() {
   server.on("/api/reset", HTTP_GET, apiReset);
   server.on("/api/target", HTTP_POST, apiTarget);
   server.on("/api/target", HTTP_GET, apiTarget);
-  server.on("/api/set", HTTP_POST, apiSet);
-  server.on("/api/set", HTTP_GET, apiSet);
   server.on("/api/slave-mask", HTTP_POST, apiSlaveMask);
   server.on("/api/slave-mask", HTTP_GET, apiSlaveMask);
   server.on("/api/count-dir", HTTP_POST, apiCountDir);
   server.on("/api/count-dir", HTTP_GET, apiCountDir);
+  server.on("/api/set", HTTP_POST, apiSet);
+  server.on("/api/set", HTTP_GET, apiSet);
   server.on("/api/color", HTTP_POST, apiColor);
   server.on("/api/color", HTTP_GET, apiColor);
   server.on("/api/save-csv", HTTP_POST, apiSaveCsv);

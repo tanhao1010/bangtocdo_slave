@@ -26,10 +26,14 @@ const app = {
     // Giai đoạn 2: bracket loại trực tiếp
     bracket: null,        // {size, rounds:[[match...]], third, placement}
     currentMatch: null,   // trận đang đấu: {round, idx} hoặc {third:true}
+    bracketImportSize: 16,
+    previewMode: 'qualifying',
     // Timer mode (3/4) state
     timerMode: 3,           // 3 = dem nguoc, 4 = dem toi
     timerTarget: 60,
     timerPaused: false,
+    timerSyncedKey: '',
+    timerSyncPromise: null,
     activeSlaveMask: 3,
     // Counter mode (5) state
     counter1: 0,
@@ -137,9 +141,10 @@ const app = {
     await this.updateSlaveMaskFromUi(prefix);
   },
 
-  async updateSlaveMaskFromUi(prefix) {
+  async updateSlaveMaskFromUi(prefix, force = false) {
     const s1 = document.getElementById(`${prefix}-use-s1`);
     const s2 = document.getElementById(`${prefix}-use-s2`);
+    const prevMask = this.state.activeSlaveMask || 0;
     let mask = (s1 && s1.checked ? 1 : 0) | (s2 && s2.checked ? 2 : 0);
     if (!mask) {
       mask = 1;
@@ -147,7 +152,9 @@ const app = {
     }
     this.state.activeSlaveMask = mask;
     this.syncSlaveMaskInputs();
-    await this.api.post('/api/slave-mask', { mask });
+    if (force || mask !== prevMask) {
+      await this.api.post('/api/slave-mask', { mask });
+    }
   },
 
   preferredSelectedSlave(data) {
@@ -168,6 +175,8 @@ const app = {
           this.state.currentCandidates = data.candidates;
           this.state.top16 = data.top16 || [];
           this.state.bracketSize = data.bracketSize || 16;
+          this.state.bracketImportSize = data.bracketImportSize || data.bracketSize || 16;
+          this.state.previewMode = data.previewMode || (data.bracket ? 'bracket' : 'qualifying');
           this.state.tournamentName = data.tournamentName || "";
           this.state.qualRun1 = data.qualRun1 || {};
           this.state.qualRun2 = data.qualRun2 || {};
@@ -283,12 +292,20 @@ const app = {
       candidates: this.state.currentCandidates,
       top16: this.state.top16,
       bracketSize: this.state.bracketSize || 16,
+      bracketImportSize: this.state.bracketImportSize || this.state.bracketSize || 16,
+      previewMode: this.state.previewMode || 'qualifying',
       tournamentName: this.state.tournamentName,
       qualRun1: this.state.qualRun1 || {},
       qualRun2: this.state.qualRun2 || {},
       bracket: this.state.bracket || null
     };
-    this.apiSaveStateServer(data);
+    return this.apiSaveStateServer(data);
+  },
+
+  refreshResultsPreviewIfVisible() {
+    if (document.querySelector('#candidate-table tbody')) {
+      this.renderCSVPreview();
+    }
   },
 
   normalizeBracketRules() {
@@ -296,6 +313,15 @@ const app = {
     this.state.bracket.bestOf = 5;
     this.state.bracket.normalMaxGames = 3;
     this.state.bracket.winTarget = 2;
+    if ((this.state.bracket.size || 0) >= 4 && !this.state.bracket.third) {
+      this.state.bracket.third = {
+        p1: null, p2: null, games: [], wins1: 0, wins2: 0, t1: 0, t2: 0,
+        winner: null, loser: null, done: false
+      };
+      if (typeof this.updateThirdPlaceMatch === 'function') {
+        this.updateThirdPlaceMatch();
+      }
+    }
   },
 
   // ── 1. MODULE XÁC THỰC ──
@@ -353,6 +379,21 @@ const app = {
   },
 
   // ── 3. MODULE TIỆN ÍCH (CLOCK & TOAST) ──
+  setTournamentImportVisible(visible) {
+    const importGrid = document.querySelector('#add-tournament .import-grid');
+    if (importGrid) importGrid.classList.toggle('hidden', !visible);
+  },
+
+  openTournamentImport() {
+    this.setTournamentImportVisible(true);
+    this.navigate('add-tournament');
+  },
+
+  openTournamentResults() {
+    this.setTournamentImportVisible(false);
+    this.navigate('add-tournament');
+  },
+
   startClock() {
     const update = () => {
       const now = new Date();
@@ -527,6 +568,7 @@ const app = {
       p1.innerText = p2.innerText;
       p2.innerText = t;
     }
+    this.syncPenaltyButtons();
     this.swapLaneElapsedState();
     const g1 = document.getElementById('l1-games');
     const g2 = document.getElementById('l2-games');
@@ -600,6 +642,7 @@ const app = {
       document.getElementById(`${id}-ms`).textContent = '.000s';
       document.getElementById(`${id}-pen`).innerText = '0';
     });
+    this.syncPenaltyButtons();
 
     const lapPanel = document.getElementById('rv-lap-panel');
     if (lapPanel) lapPanel.style.display = 'none';
@@ -670,6 +713,7 @@ const app = {
     document.getElementById('l1-time').firstChild.textContent = '0';
     document.getElementById('l1-ms').textContent = '.000s';
     document.getElementById('l1-pen').innerText = '0';
+    this.syncPenaltyButtons();
     this.setStatus('l1', 'CHO BAM START', '#ffcc40', 'rgba(255,190,30,0.18)', 'rgba(255,190,30,0.45)');
 
     document.getElementById('rv-title').innerText = 'TIME LAPSE';
@@ -768,6 +812,45 @@ const app = {
         <div class="lap-item">
           <span class="lap-idx">Vòng ${i}</span>
           <span class="lap-time" style="font-family:'JetBrains Mono',monospace;">--.---s</span>
+        </div>
+      `;
+    }
+    listEl.innerHTML = html;
+  },
+
+  renderLapList() {
+    const listEl = document.getElementById('lap-list');
+    if (!listEl) return;
+
+    const fmtMs = (ms) => {
+      if (!Number.isFinite(ms) || ms < 0) return '--.---s';
+      const totalSecs = Math.floor(ms / 1000);
+      const msPart = ms % 1000;
+      return `${totalSecs}.${String(msPart).padStart(3, '0')}s`;
+    };
+
+    let html = `
+      <div class="lap-item lap-head">
+        <span class="lap-idx">V&ograve;ng</span>
+        <span class="lap-time">T&#7893;ng</span>
+        <span class="lap-split">1 v&ograve;ng</span>
+      </div>
+    `;
+    for (let i = 1; i <= 20; i++) {
+      const rec = this.state.lapRecords[i - 1];
+      const prev = this.state.lapRecords[i - 2];
+      const splitMs = rec ? rec.timeMs - (prev ? prev.timeMs : 0) : null;
+      html += rec ? `
+        <div class="lap-item filled fade-up">
+          <span class="lap-idx">V&ograve;ng ${i}</span>
+          <span class="lap-time">${rec.time}</span>
+          <span class="lap-split">${fmtMs(splitMs)}</span>
+        </div>
+      ` : `
+        <div class="lap-item">
+          <span class="lap-idx">V&ograve;ng ${i}</span>
+          <span class="lap-time">--.---s</span>
+          <span class="lap-split">--.---s</span>
         </div>
       `;
     }
@@ -935,6 +1018,7 @@ const app = {
 
     document.getElementById('l2-name').innerHTML = formatName(c2);
     document.getElementById('l2-pen').innerText = d2.penalty;
+    this.syncPenaltyButtons();
 
     // Load original and elapsed states from draft if pre-existing
     const penVal1 = d1.penalty === 'DQ' ? 0 : parseInt(d1.penalty) || 0;
@@ -1105,6 +1189,21 @@ const app = {
     }
   },
 
+  updatePenaltyButtons(laneArg, value) {
+    const lane = Number(laneArg);
+    const selected = String(value == null ? '0' : value).trim() || '0';
+    document.querySelectorAll(`.rv-p-btn[data-pen-lane="${lane}"]`).forEach(btn => {
+      btn.classList.toggle('active', selected !== '0' && btn.dataset.penValue === selected);
+    });
+  },
+
+  syncPenaltyButtons() {
+    [1, 2].forEach(lane => {
+      const el = document.getElementById(`l${lane}-pen`);
+      this.updatePenaltyButtons(lane, el ? el.innerText : '0');
+    });
+  },
+
   setPenalty(laneArg, points) {
     const lane = Number(laneArg);
     const isSolo = this.state.layoutMode === 'solo';
@@ -1140,6 +1239,7 @@ const app = {
         lanes.forEach(l => {
           const el = document.getElementById(`l${l}-pen`);
           if (el) el.innerText = 'DQ';
+          this.updatePenaltyButtons(l, 'DQ');
 
           if (l === 1) {
             this.state.lane1Elapsed = 0;
@@ -1161,6 +1261,7 @@ const app = {
         lanes.forEach(l => {
           const el = document.getElementById(`l${l}-pen`);
           if (el) el.innerText = points;
+          this.updatePenaltyButtons(l, points);
 
           // Add 0.2s * points to the display time
           const originalTime = l === 1 ? this.state.lane1OriginalElapsed : this.state.lane2OriginalElapsed;
@@ -1189,6 +1290,7 @@ const app = {
       lanes.forEach(l => {
         const el = document.getElementById(`l${l}-pen`);
         if (el) el.innerText = '0';
+        this.updatePenaltyButtons(l, '0');
       });
       this.showToast(isSolo ? 'Đã xóa penalty' : `Làn ${lane}: Đã xóa penalty`);
 
@@ -1347,13 +1449,31 @@ const app = {
   displayedLaneWinner() {
     const t1 = this.laneTotalSeconds(1);
     const t2 = this.laneTotalSeconds(2);
-    if (t1 === t2) return this.state.lastWinner === 2 ? 2 : 1;
+    if (t1 === t2) return this.state.lastWinner || null;
     return t1 < t2 ? 1 : 2;
   },
 
   applyRaceOutcomeToUi(winnerLane = null) {
     if (this.state.layoutMode === 'solo') return;
+    const pen1 = this.lanePenaltyRaw(1);
+    const pen2 = this.lanePenaltyRaw(2);
+    if (!winnerLane && pen1 === 'DQ' && pen2 === 'DQ') {
+      [1, 2].forEach(lane => {
+        const laneId = `l${lane}`;
+        const timeEl = document.getElementById(`${laneId}-time`);
+        if (timeEl) timeEl.style.color = '#ff4757';
+        this.setStatus(
+          laneId,
+          'DQ',
+          '#ff4757',
+          'rgba(220,40,40,0.20)',
+          'rgba(255,71,87,0.55)'
+        );
+      });
+      return;
+    }
     const winner = winnerLane || this.displayedLaneWinner();
+    if (!winner) return;
     [1, 2].forEach(lane => {
       const isWin = lane === winner;
       const laneId = `l${lane}`;
@@ -1507,6 +1627,7 @@ const app = {
       const pen = document.getElementById(`${id}-pen`);
       if (pen) pen.innerText = '0';
     });
+    this.syncPenaltyButtons();
     this.pushDisplayState({ phase: 'idle', includeTimes: false }, true);
   },
 
@@ -1517,7 +1638,7 @@ const app = {
 
     // Trận bracket: ghi kết quả, tiến vòng
     if (this.state.isBracketMatch) {
-      this.recordBracketResult();
+      await this.recordBracketResult();
       return;
     }
     if (this.state.raceMode !== 'qualifying') {
@@ -1569,10 +1690,11 @@ const app = {
     this.state.lastWinner = 0;
     document.getElementById('l1-pen').innerText = '0';
     document.getElementById('l2-pen').innerText = '0';
+    this.syncPenaltyButtons();
     const bestOf = (this.state.bracket && this.state.bracket.bestOf) || 5;
     const gameNo = (match.games ? match.games.length : 0) + 1;
     document.getElementById('rv-title').innerText =
-      `ĐỐI KHÁNG · Ván ${Math.min(gameNo, bestOf)}/${bestOf} (${match.wins1 || 0}-${match.wins2 || 0})`;
+      `ĐỐI KHÁNG · Lượt ${Math.min(gameNo, bestOf)}/${bestOf} (${match.wins1 || 0}-${match.wins2 || 0})`;
     // Vẫn ở chế độ đấu bracket để CHỐT lần sau ghi tiếp vào trận này
     this.state.isBracketMatch = true;
     this.renderGameDots(match);
@@ -1605,7 +1727,7 @@ const app = {
           cls += ' current';
         }
         const action = g ? ` onclick="app.reviewBracketGame(${i - 1})"` : '';
-        const title = g ? 'title="Xem lại / chạy lại ván này"' : '';
+        const title = g ? 'title="Xem lại / chạy lại lượt này"' : '';
         html += `<span class="${cls}"${action} ${title}>${i}</span>`;
       }
       return html;
@@ -1642,14 +1764,15 @@ const app = {
     this.state.lane2Elapsed = (g.pen2 === 'DQ') ? 0 : Math.round((g.t2 || raw2) * 1000);
     document.getElementById('l1-pen').innerText = g.pen1 == null ? '0' : g.pen1;
     document.getElementById('l2-pen').innerText = g.pen2 == null ? '0' : g.pen2;
+    this.syncPenaltyButtons();
     this.updateLaneTimeDisplay('l1', this.state.lane1Elapsed);
     this.updateLaneTimeDisplay('l2', this.state.lane2Elapsed);
     this.applyRaceOutcomeToUi(g.winner || null);
     document.getElementById('rv-title').innerText =
-      `ĐỐI KHÁNG · Sửa ván ${gameIndex + 1}/${(this.state.bracket && this.state.bracket.bestOf) || 5} (${match.wins1 || 0}-${match.wins2 || 0})`;
+      `ĐỐI KHÁNG · Sửa lượt ${gameIndex + 1}/${(this.state.bracket && this.state.bracket.bestOf) || 5} (${match.wins1 || 0}-${match.wins2 || 0})`;
     this.renderGameDots(match);
     this.pushDisplayState({ phase: 'done', includeTimes: true }, true);
-    this.showToast(`Đang xem lại ván ${gameIndex + 1}. Bấm START để chạy lại hoặc CHỐT để ghi đè.`);
+    this.showToast(`Đang xem lại lượt ${gameIndex + 1}. Bấm START để chạy lại hoặc CHỐT để ghi đè.`);
   },
 
   recomputeMatchScore(match) {
@@ -1667,16 +1790,17 @@ const app = {
     const normalMax = bk.normalMaxGames || 3;
     const bestOf = bk.bestOf || 5;
     const games = match.games || [];
-    if (games.length < normalMax) return match.wins1 >= winTarget || match.wins2 >= winTarget;
+    const hasWinner = match.wins1 >= winTarget || match.wins2 >= winTarget;
+    if (!hasWinner && games.length < normalMax) return false;
     const firstThreeAllFaulted = games.slice(0, normalMax)
       .every(g => g.pen1 === 'DQ' || g.pen2 === 'DQ' || Number(g.pen1 || 0) > 0 || Number(g.pen2 || 0) > 0);
-    if (firstThreeAllFaulted && games.length < bestOf) return false;
-    return match.wins1 >= winTarget || match.wins2 >= winTarget || games.length >= bestOf;
+    if (games.length >= normalMax && firstThreeAllFaulted && games.length < bestOf) return false;
+    return hasWinner || games.length >= bestOf;
   },
 
   clearFutureRoundsAfterEdit(cm, oldWinner, newWinner) {
     const bk = this.state.bracket;
-    if (!bk || cm.third || oldWinner === newWinner) return;
+    if (!bk || cm.third || !oldWinner || oldWinner === newWinner) return;
     for (let r = cm.round + 1; r < bk.rounds.length; r++) {
       bk.rounds[r].forEach(m => {
         m.games = [];
@@ -1686,15 +1810,21 @@ const app = {
         m.t2 = 0;
         m.winner = null;
         m.loser = null;
+        m.doubleDq = false;
         m.done = false;
       });
     }
-    bk.third = null;
+    if (bk.third) {
+      Object.assign(bk.third, {
+        p1: null, p2: null, games: [], wins1: 0, wins2: 0, t1: 0, t2: 0,
+        winner: null, loser: null, doubleDq: false, done: false
+      });
+    }
     bk.placement = {};
   },
 
   // Ghi kết quả 1 VÁN của trận bracket (best-of-5). Đủ 3 ván thắng = vào vòng trong.
-  recordBracketResult() {
+  async recordBracketResult() {
     const bk = this.state.bracket;
     const cm = this.state.currentMatch;
     if (!bk || !cm) { this.showToast('Không rõ trận đang đấu!'); this.navigate('bracket'); return; }
@@ -1708,7 +1838,7 @@ const app = {
     const editIndex = Number.isInteger(this.state.editingGameIndex) ? this.state.editingGameIndex : -1;
 
     if (match.done && editIndex < 0) {
-      this.showToast('Trận này đã kết thúc! Bấm số ván 1-5 để xem lại hoặc chạy lại.');
+      this.showToast('Trận này đã kết thúc! Bấm số lượt 1-5 để xem lại hoặc chạy lại.');
       return;
     }
 
@@ -1726,17 +1856,19 @@ const app = {
     const pen2 = penSec(pen2Raw);
     const total1 = (pen1Raw === 'DQ') ? 99999 : ((t1 <= 0) ? 9999 : t1 + pen1);
     const total2 = (pen2Raw === 'DQ') ? 99999 : ((t2 <= 0) ? 9999 : t2 + pen2);
+    const bothDq = pen1Raw === 'DQ' && pen2Raw === 'DQ';
 
     // Nhanh hơn thắng ván; bằng nhau dùng winner cảm biến (1=slave1, 2=slave2)
-    let g1wins;
-    if (total1 === total2) {
+    let gameWinner = null;
+    if (!bothDq && total1 === total2) {
       let w = this.state.lastWinner;
       if (this.state.bracketLaneSwapped && w) w = w === 1 ? 2 : 1;
-      g1wins = w !== 2;
+      gameWinner = w === 2 ? 2 : 1;
+    } else if (!bothDq) {
+      gameWinner = total1 < total2 ? 1 : 2;
     }
-    else g1wins = total1 < total2;
 
-    this.applyRaceOutcomeToUi(g1wins ? 1 : 2);
+    this.applyRaceOutcomeToUi(gameWinner);
 
     const oldWinner = match.winner;
     const gameData = {
@@ -1746,7 +1878,7 @@ const app = {
       pen2: pen2Raw,
       t1: total1 < 9999 ? total1 : 0,
       t2: total2 < 9999 ? total2 : 0,
-      winner: g1wins ? 1 : 2
+      winner: gameWinner
     };
     if (editIndex >= 0) match.games[editIndex] = gameData;
     else match.games.push(gameData);
@@ -1763,22 +1895,28 @@ const app = {
 
     if (!decided) {
       // Chưa phân thắng bại: Ở LẠI màn đua, chuẩn bị ván tiếp theo ngay
-      this.saveToLocal();
-      this.saveResultsCsv('bracket');   // lưu thời gian ván vừa đấu lên thiết bị
-      this.prepareNextGame(match);
+      await this.saveToLocal();
+      await this.saveResultsCsv('bracket');   // lưu thời gian ván vừa đấu lên thiết bị
+      this.refreshResultsPreviewIfVisible();
+      await this.prepareNextGame(match);
       this.state.editingGameIndex = null;
-      this.showToast(`Ván ${match.games.length}/${bestOf} xong: ${match.wins1} - ${match.wins2}. Bấm START đấu ván tiếp.`);
+      this.showToast(`Lượt ${match.games.length}/${bestOf} xong: ${match.wins1} - ${match.wins2}. Bấm START đấu lượt tiếp.`);
       return;
     }
 
     // Đã phân thắng bại
     const p1wins = match.wins1 > match.wins2;
-    match.winner = p1wins ? match.p1 : match.p2;
-    match.loser = p1wins ? match.p2 : match.p1;
+    const p2wins = match.wins2 > match.wins1;
+    const noMatchWinner = !p1wins && !p2wins;
+    match.winner = p1wins ? match.p1 : (p2wins ? match.p2 : null);
+    match.loser = p1wins ? match.p2 : (p2wins ? match.p1 : null);
+    match.doubleDq = noMatchWinner;
     match.done = true;
     this.clearFutureRoundsAfterEdit(cm, oldWinner, match.winner);
 
-    if (cm.third) {
+    if (noMatchWinner) {
+      // Both sides are DQ/no-score after the maximum luot. Do not advance either side.
+    } else if (cm.third) {
       bk.placement[3] = match.winner;
       bk.placement[4] = match.loser;
     } else {
@@ -1795,22 +1933,17 @@ const app = {
       }
       // Sau bán kết (vòng áp chót, >= 2 trận): tạo trận tranh hạng 3 khi cả 2 bán kết xong
       const semiRound = bk.rounds.length - 2;
-      if (cm.round === semiRound && bk.size >= 4 && !bk.third) {
-        const semis = bk.rounds[semiRound];
-        if (semis.length === 2 && semis.every(m => m.done)) {
-          bk.third = {
-            p1: semis[0].loser, p2: semis[1].loser,
-            games: [], wins1: 0, wins2: 0, t1: 0, t2: 0, winner: null, loser: null, done: false
-          };
-        }
+      if (cm.round === semiRound && bk.size >= 4) {
+        this.updateThirdPlaceMatch();
       }
     }
 
     this.state.currentMatch = null;
     this.state.isBracketMatch = false;
     this.state.editingGameIndex = null;
-    this.saveToLocal();
-    this.saveResultsCsv('bracket');   // lưu toàn bộ thời gian các ván lên thiết bị
+    await this.saveToLocal();
+    await this.saveResultsCsv('bracket');   // lưu toàn bộ thời gian các ván lên thiết bị
+    this.refreshResultsPreviewIfVisible();
     this.navigate('bracket');
     this.generateBracket();
     this.showToast(`Kết thúc trận: ${match.wins1} - ${match.wins2}!`);
@@ -1896,13 +2029,45 @@ const app = {
       for (let i = 0; i < count; i++) round.push(mk(null, null));
       rounds.push(round);
     }
-    this.state.bracket = { size, rounds, third: null, placement: {}, bestOf: 5, normalMaxGames: 3, winTarget: 2 };
+    this.state.bracket = {
+      size,
+      rounds,
+      third: size >= 4 ? mk(null, null) : null,
+      placement: {},
+      bestOf: 5,
+      normalMaxGames: 3,
+      winTarget: 2
+    };
     this.state.currentMatch = null;
+  },
+
+  updateThirdPlaceMatch() {
+    const bk = this.state.bracket;
+    if (!bk || bk.size < 4) return;
+    const empty = {
+      p1: null, p2: null, games: [], wins1: 0, wins2: 0, t1: 0, t2: 0,
+      winner: null, loser: null, doubleDq: false, done: false
+    };
+    if (!bk.third) bk.third = { ...empty };
+
+    const semiRound = bk.rounds.length - 2;
+    const semis = bk.rounds[semiRound] || [];
+    if (semis.length !== 2 || !semis.every(m => m.done)) {
+      if (!bk.third.done) Object.assign(bk.third, empty);
+      return;
+    }
+
+    const p1 = semis[0].loser;
+    const p2 = semis[1].loser;
+    if (bk.third.p1 !== p1 || bk.third.p2 !== p2) {
+      Object.assign(bk.third, { ...empty, p1, p2 });
+    }
   },
 
   advanceMatchWinner(match, winnerRank, loserRank) {
     match.winner = winnerRank;
     match.loser = loserRank || null;
+    match.doubleDq = false;
     match.done = true;
     match.wins1 = match.p1 === winnerRank ? 2 : 0;
     match.wins2 = match.p2 === winnerRank ? 2 : 0;
@@ -1936,6 +2101,18 @@ const app = {
         });
       }
     }
+    this.updateThirdPlaceMatch();
+    if (bk.third && !bk.third.done && bk.third.p1 != null && bk.third.p2 != null) {
+      const a1 = this.seedAthlete(bk.third.p1);
+      const a2 = this.seedAthlete(bk.third.p2);
+      if ((a1 && !a2) || (!a1 && a2)) {
+        const winner = a1 ? bk.third.p1 : bk.third.p2;
+        const loser = a1 ? bk.third.p2 : bk.third.p1;
+        this.advanceMatchWinner(bk.third, winner, loser);
+        bk.placement[3] = winner;
+        bk.placement[4] = loser;
+      }
+    }
   },
 
   // VĐV theo seed rank (1..size)
@@ -1964,19 +2141,21 @@ const app = {
     const bk = this.state.bracket;
     const labelByMatches = { 8: 'Vòng 1/16', 4: 'Vòng 1/8', 2: 'Vòng 1/4 (Bán kết)', 1: 'Chung kết' };
     const clsByMatches = { 8: 'bwc-r16', 4: 'bwc-qf', 2: 'bwc-sf', 1: 'bwc-final' };
+    const matchCodeByMatches = { 8: '1-16', 4: '1-8', 2: 'BK', 1: 'CK' };
+    const cleanRoundLabelByMatches = { 8: 'V&ograve;ng 1-16', 4: 'V&ograve;ng 1-8', 2: 'BK', 1: 'CK' };
 
     const playerRow = (rank, m, side) => {
       const a = this.seedAthlete(rank);
       const name = a ? a.name : 'TBD';
       const wins = side === 1 ? (m.wins1 || 0) : (m.wins2 || 0);
       const isWin = m.done && rank != null && m.winner === rank;
-      const isLose = m.done && rank != null && m.loser === rank;
+      const isLose = m.done && rank != null && (m.loser === rank || m.doubleDq);
       let cls = 'bk-player';
       if (!a) cls += ' bk-tbd';
       if (isWin) cls += ' bk-win';
       if (isLose) cls += ' bk-lose';
       // Số ván thắng (best-of-5)
-      const winBadge = (rank != null) ? `<span class="bk-wins">${wins}</span>` : '';
+      const winBadge = (rank != null) ? `<span class="bk-wins${m.doubleDq ? ' bk-dq-badge' : ''}">${m.doubleDq ? 'DQ' : wins}</span>` : '';
       const t = side === 1 ? m.t1 : m.t2;
       const tStr = (t > 0) ? `<span class="bk-mtime">${t.toFixed(3)}s</span>` : '';
       return `<div class="${cls}">
@@ -1992,13 +2171,17 @@ const app = {
       const rows = m.games.map((g, i) => {
         const w1 = g.winner === 1 ? ' bk-g-win' : '';
         const w2 = g.winner === 2 ? ' bk-g-win' : '';
-        return `<div class="bk-grow"><span class="bk-gidx">V${i + 1}</span><span class="bk-gt${w1}">${g.t1 ? g.t1.toFixed(3) : '—'}</span><span class="bk-gt${w2}">${g.t2 ? g.t2.toFixed(3) : '—'}</span></div>`;
+        const dq1 = g.pen1 === 'DQ';
+        const dq2 = g.pen2 === 'DQ';
+        const v1 = dq1 ? 'DQ' : (g.t1 ? g.t1.toFixed(3) : '&mdash;');
+        const v2 = dq2 ? 'DQ' : (g.t2 ? g.t2.toFixed(3) : '&mdash;');
+        return `<div class="bk-grow"><span class="bk-gidx">V${i + 1}</span><span class="bk-gt${w1}${dq1 ? ' bk-g-dq' : ''}">${v1}</span><span class="bk-gt${w2}${dq2 ? ' bk-g-dq' : ''}">${v2}</span></div>`;
       }).join('');
       const bestOf = (this.state.bracket.bestOf || 5);
-      return `<div class="bk-games"><div class="bk-grow bk-ghead"><span class="bk-gidx">Ván</span><span class="bk-gt">L1</span><span class="bk-gt">L2</span></div>${rows}</div>`;
+      return `<div class="bk-games"><div class="bk-grow bk-ghead"><span class="bk-gidx">L&#432;&#7907;t</span><span class="bk-gt">L1</span><span class="bk-gt">L2</span></div>${rows}</div>`;
     };
 
-    const matchBox = (roundArg, idx, m) => {
+    const matchBox = (roundArg, idx, m, roundSize = 0) => {
       const hasBoth = m.p1 != null && m.p2 != null;
       const ready = hasBoth && !m.done;
       let cls = 'bk-match';
@@ -2012,12 +2195,15 @@ const app = {
       const bestOf = (this.state.bracket.bestOf || 5);
       let score = '';
       if (hasBoth && (m.games && m.games.length > 0 || m.done)) {
-        const tag = m.done ? 'Kết thúc' : `Ván ${m.games.length}/${bestOf}`;
+        const tag = m.done ? 'K&#7871;t th&uacute;c' : `L&#432;&#7907;t ${m.games.length}/${bestOf}`;
         score = `<div class="bk-score">${tag} · <b>${m.wins1 || 0}-${m.wins2 || 0}</b></div>`;
       } else if (ready) {
-        score = `<div class="bk-score">Đấu ${bestOf} ván</div>`;
+        score = `<div class="bk-score">T&#7889;i &#273;a ${bestOf} l&#432;&#7907;t</div>`;
       }
+      const code = roundArg === 'third' ? 'H3' : (matchCodeByMatches[roundSize] || 'V');
+      const matchLabel = (code === 'CK' || code === 'H3') ? code : `${code} ${idx + 1}`;
       return `<div class="${cls}" ${click}>
+        <div class="bk-match-label">${matchLabel}</div>
         ${playerRow(m.p1, m, 1)}
         <div class="bk-sep"></div>
         ${playerRow(m.p2, m, 2)}
@@ -2028,12 +2214,12 @@ const app = {
 
     let html = '<div class="bwc-bracket bk-std">';
     bk.rounds.forEach((round, r) => {
-      const label = labelByMatches[round.length] || `Vòng (${round.length})`;
+      const label = cleanRoundLabelByMatches[round.length] || labelByMatches[round.length] || `V&ograve;ng (${round.length})`;
       const cls = clsByMatches[round.length] || '';
       html += `<div class="bwc-col ${cls}"><div class="bk-round-label">${label}</div>`;
       for (let g = 0; g < round.length; g += 2) {
-        const a = matchBox(r, g, round[g]);
-        const b = (g + 1 < round.length) ? matchBox(r, g + 1, round[g + 1]) : '';
+        const a = matchBox(r, g, round[g], round.length);
+        const b = (g + 1 < round.length) ? matchBox(r, g + 1, round[g + 1], round.length) : '';
         html += `<div class="bwc-group bwc-group-left">${a}${b}</div>`;
       }
       html += '</div>';
@@ -2042,7 +2228,7 @@ const app = {
     // Cột tranh hạng 3 (nếu có)
     if (bk.third) {
       html += `<div class="bwc-col bwc-third"><div class="bk-round-label">Tranh hạng 3</div>`;
-      html += matchBox('third', 0, bk.third);
+      html += matchBox('third', 0, bk.third, 0);
       html += '</div>';
     }
     html += '</div>';
@@ -2202,6 +2388,19 @@ const app = {
       return;
     }
 
+    if (match.done) {
+      this.showToast('Tran nay da ket thuc. Khong tu chay lai luot cu.');
+      return;
+    }
+    if (Array.isArray(match.games)) {
+      const compactGames = match.games.filter(Boolean);
+      if (compactGames.length !== match.games.length) {
+        match.games = compactGames;
+        this.recomputeMatchScore(match);
+        this.saveToLocal();
+      }
+    }
+
     const p1 = this.seedAthlete(match.p1) || { name: '---', dob: '' };
     const p2 = this.seedAthlete(match.p2) || { name: '---', dob: '' };
     const name1 = p1.name;
@@ -2209,6 +2408,7 @@ const app = {
 
     // Ghi nhận trận đang đấu để chốt xong biết ghi kết quả vào đâu
     this.state.currentMatch = isThird ? { third: true } : { round: Number(roundArg), idx };
+    this.state.editingGameIndex = null;
 
     // Set lanes manually for this specific match without destroying the global array
     this.state.lane1Idx = typeof p1.originalIndex === 'number' ? p1.originalIndex : 0;
@@ -2241,10 +2441,11 @@ const app = {
     });
 
     // Tiêu đề: hiện số ván đang đấu (best-of-5)
+    this.syncPenaltyButtons();
     const bestOf = bk.bestOf || 5;
     const gameNo = (match.games ? match.games.length : 0) + 1;
     document.getElementById('rv-title').innerText =
-      `ĐỐI KHÁNG · Ván ${Math.min(gameNo, bestOf)}/${bestOf} (${match.wins1 || 0}-${match.wins2 || 0})`;
+      `ĐỐI KHÁNG · Lượt ${Math.min(gameNo, bestOf)}/${bestOf} (${match.wins1 || 0}-${match.wins2 || 0})`;
     document.getElementById('rv-nav-wrap').style.display = 'none';
     document.getElementById('btn-custom-lock').style.display = 'flex';
     document.getElementById('btn-rv-next').style.display = 'none';
@@ -2270,9 +2471,9 @@ const app = {
     document.getElementById('l2-name').innerHTML = formatMatchName(p2);
 
     this.renderGameDots(match);
-    if (match.games && match.games.length > 0) {
+    if (match.done && match.games && match.games.length > 0) {
       this.reviewBracketGame(match.games.length - 1);
-      this.showToast('Đã load dữ liệu trận cũ. Bấm số ván 1-5 để xem lại/chạy lại.');
+      this.showToast('Đã load dữ liệu trận cũ. Bấm số lượt 1-5 để xem lại/chạy lại.');
     } else {
       this.pushDisplayState({ phase: 'idle', includeTimes: false }, true);
       this.showToast(`Bắt đầu trận đấu: ${name1} vs ${name2}`);
@@ -2350,31 +2551,45 @@ const app = {
     };
 
     const withBracket = (stage === 'bracket');
-    let csv = withBracket
-      ? 'Xếp hạng,SBD,Họ và Tên,Ngày sinh,Tỉnh,Lần 1,Lần 2,Tốt nhất,Kết quả,' +
-      '1/16-V1,1/16-V2,1/16-V3,1/16-V4,1/16-V5,' +
-      '1/8-V1,1/8-V2,1/8-V3,1/8-V4,1/8-V5,' +
-      'BK-V1,BK-V2,BK-V3,BK-V4,BK-V5,' +
-      'CK-V1,CK-V2,CK-V3,CK-V4,CK-V5\n'
-      : 'Xếp hạng,SBD,Họ và Tên,Ngày sinh,Tỉnh,Lần 1,Lần 2,Tốt nhất\n';
+    let csv = 'Xếp hạng,SBD,Họ và Tên,Ngày sinh,Đơn vị,Lần 1,Lần 2,Tốt nhất\n';
+    if (withBracket) {
+      const rounds = this.bracketStatsRounds();
+      const headers = ['Seed', 'SBD', 'Họ và Tên', 'Kết quả'];
+      headers.splice(3, 0, 'Đơn vị');
+      rounds.forEach(round => {
+        for (let g = 1; g <= 5; g++) {
+          headers.push(`${round === 'CK_H3' ? 'CK/H3' : round}-V${g}`);
+        }
+      });
+      csv = headers.join(',') + '\n';
+      (this.state.top16 || []).forEach((seed, i) => {
+        const row = [
+          seed.rank || i + 1,
+          esc(seed.sbd || ''),
+          esc(seed.name || ''),
+          esc(seed.province || ''),
+          esc(seed.originalIndex >= 0 ? (this.bracketResultOf(seed.originalIndex) || '') : (seed.name || ''))
+        ];
+        rounds.forEach(round => {
+          for (let g = 1; g <= 5; g++) {
+            row.push(esc(seed.originalIndex >= 0 ? this.getGameTime(seed.originalIndex, round, g) : '—'));
+          }
+        });
+        csv += row.join(',') + '\n';
+      });
+    } else {
     sortedList.forEach((item, i) => {
       const c = item.candidate;
       const row = [
         i + 1, esc(c.sbd || ''), esc(c.name), esc(c.dob), esc(c.province || ''),
         this.fmtSec(item.t1), this.fmtSec(item.t2), this.fmtSec(item.best)
       ];
-      if (withBracket) {
-        row.push(esc(this.bracketResultOf(item.originalIndex)));
-        ['1/16', '1/8', 'BK', 'CK_H3'].forEach(round => {
-          for (let g = 1; g <= 5; g++) {
-            row.push(esc(this.getGameTime(item.originalIndex, round, g)));
-          }
-        });
-      }
       csv += row.join(',') + '\n';
     });
+    }
 
     const fname = stage === 'luot1' ? 'ket_qua_luot1'
+      : stage === 'luot2' ? 'ket_qua_luot2'
       : stage === 'bracket' ? 'ket_qua_bracket'
         : 'ket_qua_vong_loai';
     try {
@@ -2456,7 +2671,11 @@ const app = {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (e) => {
-      if (kind === 'bracket') this.parseBracketCSV(e.target.result);
+      if (kind === 'bracket') {
+        const sizeEl = document.getElementById('bracket-size-select');
+        const size = sizeEl ? parseInt(sizeEl.value) || 16 : 16;
+        this.parseBracketCSV(e.target.result, size);
+      }
       else this.parseCSV(e.target.result);
     };
     reader.readAsText(file, 'UTF-8');
@@ -2478,6 +2697,7 @@ const app = {
     this.state.qualRun1 = {};
     this.state.qualRun2 = {};
     this.state.qualOrder = [];
+    this.state.previewMode = 'qualifying';
     this.state.qualPos = 0;
     this.state.qualPass = 1;
     this.state.raceDraft = {};
@@ -2513,22 +2733,29 @@ const app = {
     return this.state.currentCandidates.length - 1;
   },
 
-  parseBracketCSV(text) {
+  async parseBracketCSV(text, bracketSize = 16) {
     const rows = this.parseCsvRows(text);
     if (rows.length <= 1) {
-      this.showToast("File vòng 1-16 trống hoặc sai định dạng!");
+      this.showToast("File bracket trống hoặc sai định dạng!");
       return;
     }
+    const size = [4, 8, 16].includes(bracketSize) ? bracketSize : 16;
+    this.state.bracketImportSize = size;
+    this.state.previewMode = 'bracket';
     const start = this.csvLooksLikeHeader(rows[0]) ? 1 : 0;
     const seeds = [];
-    for (let i = start; i < rows.length && seeds.length < 16; i++) {
+    let filledSeeds = 0;
+    for (let i = start; i < rows.length && filledSeeds < size; i++) {
       const c = this.csvRowToCandidate(rows[i]);
       const rank = c.rank || (seeds.length + 1);
+      if (rank < 1 || rank > size) continue;
       if (c.dq || !c.name) {
+        if (!seeds[rank - 1]) filledSeeds++;
         seeds[rank - 1] = { rank, dq: true, originalIndex: -1, name: 'DQ', dob: '', province: '', sbd: '', total: 99999 };
         continue;
       }
       const idx = this.findOrCreateCandidateFromSeed(c);
+      if (!seeds[rank - 1]) filledSeeds++;
       seeds[rank - 1] = {
         name: c.name,
         dob: c.dob,
@@ -2539,18 +2766,23 @@ const app = {
         originalIndex: idx
       };
     }
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < size; i++) {
       if (!seeds[i]) seeds[i] = { rank: i + 1, dq: true, originalIndex: -1, name: 'BYE', dob: '', province: '', sbd: '', total: 99999 };
     }
     this.state.top16 = seeds;
-    this.state.bracketSize = 16;
-    this.buildBracketState(16);
+    this.state.bracketSize = size;
+    this.buildBracketState(size);
     this.applyBracketByes();
-    this.saveToLocal();
+    await this.saveToLocal();
     this.renderCSVPreview();
-    this.navigate('bracket');
-    this.generateBracket();
-    this.showToast('Đã nạp file vòng 1-16 và tạo bracket riêng.');
+    this.showToast(`Đã nạp file vòng 1-${size} và tạo bracket riêng.`);
+  },
+
+  bracketStatsRounds() {
+    const size = this.state.bracketSize || (this.state.top16 ? this.state.top16.length : 16);
+    if (size <= 4) return ['BK', 'CK_H3'];
+    if (size <= 8) return ['1/8', 'BK', 'CK_H3'];
+    return ['1/16', '1/8', 'BK', 'CK_H3'];
   },
 
   renderCSVPreview() {
@@ -2560,20 +2792,68 @@ const app = {
     tbody.innerHTML = sortedList.map((item, i) => {
       const c = item.candidate;
       const f = (v) => this.fmtSec(v) || '—';
-      const kq = this.bracketResultOf(item.originalIndex) || '—';
-      const rounds = ['1/16', '1/8', 'BK', 'CK_H3'];
-      let roundCells = '';
+      return `<tr><td><strong>${i + 1}</strong></td><td>${c.sbd || ''}</td><td><strong>${c.name}</strong></td><td>${c.dob}</td><td>${c.province || ''}</td><td>${f(item.t1)}</td><td>${f(item.t2)}</td><td><strong>${f(item.best)}</strong></td></tr>`;
+    }).join('');
+
+    const bracketWrap = document.getElementById('bracket-stats-wrap');
+    const bracketHead = document.getElementById('bracket-stats-head');
+    const bracketBody = document.querySelector('#bracket-stats-table tbody');
+    const hasBracket = !!(this.state.bracket && this.state.top16 && this.state.top16.length);
+    const isBracketPreview = this.state.previewMode === 'bracket' && hasBracket;
+    const hasQualTimes = Object.keys(this.state.qualRun1 || {}).length > 0 ||
+      Object.keys(this.state.qualRun2 || {}).length > 0 ||
+      Object.keys(this.state.raceDraft || {}).length > 0;
+    const candidateTable = document.getElementById('candidate-table');
+    const qualWrap = candidateTable ? candidateTable.closest('.table-container') : null;
+    if (qualWrap) {
+      qualWrap.style.display = (!isBracketPreview || hasQualTimes) ? '' : 'none';
+    }
+    if (bracketWrap) bracketWrap.style.display = hasBracket ? '' : 'none';
+    if (hasBracket && bracketHead && bracketBody) {
+      if (isBracketPreview && qualWrap && bracketWrap && bracketWrap.nextElementSibling !== qualWrap) {
+        qualWrap.parentNode.insertBefore(bracketWrap, qualWrap);
+      } else if (!isBracketPreview && qualWrap && bracketWrap && qualWrap.nextElementSibling !== bracketWrap) {
+        qualWrap.parentNode.insertBefore(bracketWrap, qualWrap.nextSibling);
+      }
+      const rounds = this.bracketStatsRounds();
+      const roundHeaders = [];
       rounds.forEach(round => {
         for (let g = 1; g <= 5; g++) {
-          const val = this.getGameTime(item.originalIndex, round, g);
-          roundCells += `<td style="font-size:11px; color:var(--text-2); text-align:center; white-space:nowrap;">${val}</td>`;
+          const label = round === 'CK_H3' ? 'CK/H3' : round;
+          roundHeaders.push(`<th>${label}-V${g}</th>`);
         }
       });
-      return `<tr><td><strong>${i + 1}</strong></td><td>${c.sbd || ''}</td><td><strong>${c.name}</strong></td><td>${c.dob}</td><td>${c.province || ''}</td><td>${f(item.t1)}</td><td>${f(item.t2)}</td><td><strong>${f(item.best)}</strong></td><td>${kq}</td>${roundCells}</tr>`;
-    }).join('');
-    document.getElementById('total-candidates').innerText = this.state.currentCandidates.length;
+      bracketHead.innerHTML = `<th>STT</th><th>SBD</th><th>Họ và Tên</th><th>Kết quả</th>${roundHeaders.join('')}`;
+      bracketHead.innerHTML = `<th>STT</th><th>SBD</th><th>Họ và Tên</th><th>Đơn vị</th><th>Kết quả</th>${roundHeaders.join('')}`;
+      bracketBody.innerHTML = this.state.top16.map((seed, i) => {
+        const kq = seed.originalIndex >= 0 ? (this.bracketResultOf(seed.originalIndex) || '—') : (seed.name || '—');
+        let cells = '';
+        rounds.forEach(round => {
+          for (let g = 1; g <= 5; g++) {
+            const val = seed.originalIndex >= 0 ? this.getGameTime(seed.originalIndex, round, g) : '—';
+            cells += `<td style="font-size:11px; color:var(--text-2); text-align:center; white-space:nowrap;">${val}</td>`;
+          }
+        });
+        return `<tr><td><strong>${seed.rank || i + 1}</strong></td><td>${seed.sbd || ''}</td><td><strong>${seed.name}</strong></td><td>${seed.province || ''}</td><td>${kq}</td>${cells}</tr>`;
+      }).join('');
+    }
+    const totalCandidatesEl = document.getElementById('total-candidates');
+    const previewTitle = totalCandidatesEl ? totalCandidatesEl.closest('p') : null;
+    if (previewTitle) {
+      if (isBracketPreview) {
+        previewTitle.innerHTML = `File bracket 1-${this.state.bracketSize || this.state.top16.length}: <span id="total-candidates">${this.state.top16.length}</span> seed`;
+      } else {
+        previewTitle.innerHTML = `Danh sách & Kết quả: <span id="total-candidates">${this.state.currentCandidates.length}</span> VĐV`;
+      }
+    } else if (totalCandidatesEl) {
+      totalCandidatesEl.innerText = isBracketPreview ? this.state.top16.length : this.state.currentCandidates.length;
+    }
     if (this.state.tournamentName) {
       document.getElementById('tournament-name').value = this.state.tournamentName;
+    }
+    const bracketSizeSelect = document.getElementById('bracket-size-select');
+    if (bracketSizeSelect) {
+      bracketSizeSelect.value = String(this.state.bracketImportSize || this.state.bracketSize || 16);
     }
     document.getElementById('csv-preview').classList.remove('hidden');
   },
@@ -2586,25 +2866,42 @@ const app = {
       const s = String(v == null ? '' : v);
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
-    let csv = 'Xếp hạng,SBD,Họ và Tên,Ngày sinh,Tỉnh,Lần 1,Lần 2,Tốt nhất,Kết quả,' +
-      '1/16-V1,1/16-V2,1/16-V3,1/16-V4,1/16-V5,' +
-      '1/8-V1,1/8-V2,1/8-V3,1/8-V4,1/8-V5,' +
-      'BK-V1,BK-V2,BK-V3,BK-V4,BK-V5,' +
-      'CK-V1,CK-V2,CK-V3,CK-V4,CK-V5\n';
+    let csv = 'THỐNG KÊ VÒNG LOẠI\n';
+    csv += 'Xếp hạng,SBD,Họ và Tên,Ngày sinh,Đơn vị,Lần 1,Lần 2,Tốt nhất\n';
     sortedList.forEach((item, i) => {
       const c = item.candidate;
       const row = [
         i + 1, esc(c.sbd || ''), esc(c.name), esc(c.dob), esc(c.province || ''),
-        this.fmtSec(item.t1), this.fmtSec(item.t2), this.fmtSec(item.best),
-        esc(this.bracketResultOf(item.originalIndex))
+        this.fmtSec(item.t1), this.fmtSec(item.t2), this.fmtSec(item.best)
       ];
-      ['1/16', '1/8', 'BK', 'CK_H3'].forEach(round => {
-        for (let g = 1; g <= 5; g++) {
-          row.push(esc(this.getGameTime(item.originalIndex, round, g)));
-        }
-      });
       csv += row.join(',') + '\n';
     });
+    if (this.state.bracket && this.state.top16 && this.state.top16.length) {
+      const rounds = this.bracketStatsRounds();
+      const headers = ['Xếp hạng', 'SBD', 'Họ và Tên', 'Kết quả'];
+      headers.splice(3, 0, 'Đơn vị');
+      rounds.forEach(round => {
+        for (let g = 1; g <= 5; g++) {
+          headers.push(`${round === 'CK_H3' ? 'CK/H3' : round}-V${g}`);
+        }
+      });
+      csv += '\nTHỐNG KÊ BRACKET\n' + headers.join(',') + '\n';
+      this.state.top16.forEach((seed, i) => {
+        const row = [
+          seed.rank || i + 1,
+          esc(seed.sbd || ''),
+          esc(seed.name || ''),
+          esc(seed.province || ''),
+          esc(seed.originalIndex >= 0 ? (this.bracketResultOf(seed.originalIndex) || '') : (seed.name || ''))
+        ];
+        rounds.forEach(round => {
+          for (let g = 1; g <= 5; g++) {
+            row.push(esc(seed.originalIndex >= 0 ? this.getGameTime(seed.originalIndex, round, g) : '—'));
+          }
+        });
+        csv += row.join(',') + '\n';
+      });
+    }
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2630,6 +2927,10 @@ const app = {
     try { await fetch('/api/del-csv', { method: 'POST' }); } catch (e) { }
     const tbody = document.querySelector('#candidate-table tbody');
     if (tbody) tbody.innerHTML = '';
+    const bracketTbody = document.querySelector('#bracket-stats-table tbody');
+    if (bracketTbody) bracketTbody.innerHTML = '';
+    const bracketWrap = document.getElementById('bracket-stats-wrap');
+    if (bracketWrap) bracketWrap.style.display = 'none';
     document.getElementById('csv-preview').classList.add('hidden');
     const fileInput = document.getElementById('csv-file');
     if (fileInput) fileInput.value = '';
@@ -2680,6 +2981,7 @@ const app = {
     if (updateTimerPreview) {
       this.state.timerTarget = v;
       this._updateTimerDisplay((this.state.timerMode === 3 ? v : 0) * 1000, '#a0e0ff');
+      this.queueTimerConfigSync();
     }
     return v;
   },
@@ -2709,6 +3011,31 @@ const app = {
     document.getElementById('timer-target-input').value = this.state.timerTarget;
     this._updateTimerDisplay((this.state.timerMode === 3 ? this.state.timerTarget : 0) * 1000, '#a0e0ff');
     document.getElementById('timer-status').innerText = 'CHO BAT DAU';
+    this.queueTimerConfigSync(true);
+  },
+
+  timerConfigKey() {
+    return `${this.state.timerMode}:${this.state.timerTarget}:${this.state.activeSlaveMask || 1}`;
+  },
+
+  queueTimerConfigSync(force = false) {
+    if (!document.getElementById('timer-target-input')) return null;
+    const promise = this.syncTimerConfig(force).catch(err => {
+      console.error('timer config sync failed', err);
+    });
+    this.state.timerSyncPromise = promise;
+    return promise;
+  },
+
+  async syncTimerConfig(force = false) {
+    const tgt = parseInt(document.getElementById('timer-target-input').value) || 0;
+    this.state.timerTarget = Math.max(0, Math.min(9999, tgt));
+    await this.updateSlaveMaskFromUi('timer', force);
+    const key = this.timerConfigKey();
+    if (!force && this.state.timerSyncedKey === key) return;
+    await this.api.post('/api/mode', { m: this.state.timerMode });
+    await this.api.post('/api/target', { s: this.state.timerTarget });
+    this.state.timerSyncedKey = key;
   },
 
   async timerStart() {
@@ -2721,10 +3048,10 @@ const app = {
     }
     const tgt = parseInt(document.getElementById('timer-target-input').value) || 0;
     this.state.timerTarget = Math.max(0, Math.min(9999, tgt));
-    await this.updateSlaveMaskFromUi('timer');
-    await this.api.post('/api/mode', { m: this.state.timerMode });
-    await this.api.post('/api/target', { s: this.state.timerTarget });
-    await this.api.post('/api/arm');
+    if (this.state.timerSyncPromise) await this.state.timerSyncPromise;
+    if (this.state.timerSyncedKey !== this.timerConfigKey()) {
+      await this.syncTimerConfig(true);
+    }
     await this.api.post('/api/start');
     document.getElementById('timer-status').innerText = 'DANG CHAY';
     this._startTimerPoll();

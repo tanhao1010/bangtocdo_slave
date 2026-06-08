@@ -57,8 +57,6 @@
         </div>
       </div>
       <div class="nav-status">
-        <div class="status-dot"></div>
-        <span>ESP32 Online</span>
         <span id="slave1-status" class="slave-status">S1 --</span>
         <span id="slave2-status" class="slave-status">S2 --</span>
       </div>
@@ -120,7 +118,7 @@
         </div>
 
         <div class="feature-card fade-up delay-4" style="--card-accent:var(--blue);--card-icon-bg:var(--blue-dim);"
-          onclick="app.navigate('add-tournament')">
+          onclick="app.openTournamentImport()">
           <div class="card-icon-wrap">
             <svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round"
               stroke-linejoin="round">
@@ -193,7 +191,7 @@
         </div>
 
         <div class="feature-card wide fade-up delay-5"
-          style="--card-accent:#b03a0a;--card-icon-bg:rgba(176,58,10,0.09);" onclick="app.navigate('add-tournament')">
+          style="--card-accent:#b03a0a;--card-icon-bg:rgba(176,58,10,0.09);" onclick="app.openTournamentResults()">
           <div style="display:flex;align-items:center;gap:16px;">
             <div class="card-icon-wrap" style="flex-shrink:0;">
               <svg viewBox="0 0 24 24" fill="none" stroke="#b03a0a" stroke-width="2" stroke-linecap="round"
@@ -342,12 +340,12 @@
           <div class="rv-pen-wrap">
             <div class="rv-pen-label">PENALTY</div>
             <div class="rv-pen-grid">
-              <button class="rv-p-btn rv-p-clr" onclick="app.setPenalty(1,0)">CLR</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(1,1)">1</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(1,2)">2</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(1,3)">3</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(1,4)">4</button>
-              <button class="rv-p-btn rv-p-dq" onclick="app.setPenalty(1,'DQ')">DQ</button>
+              <button class="rv-p-btn rv-p-clr" data-pen-lane="1" data-pen-value="0" onclick="app.setPenalty(1,0)">CLR</button>
+              <button class="rv-p-btn" data-pen-lane="1" data-pen-value="1" onclick="app.setPenalty(1,1)">1</button>
+              <button class="rv-p-btn" data-pen-lane="1" data-pen-value="2" onclick="app.setPenalty(1,2)">2</button>
+              <button class="rv-p-btn" data-pen-lane="1" data-pen-value="3" onclick="app.setPenalty(1,3)">3</button>
+              <button class="rv-p-btn" data-pen-lane="1" data-pen-value="4" onclick="app.setPenalty(1,4)">4</button>
+              <button class="rv-p-btn rv-p-dq" data-pen-lane="1" data-pen-value="DQ" onclick="app.setPenalty(1,'DQ')">DQ</button>
             </div>
             <div class="rv-pen-total">Lỗi: <span id="l1-pen">0</span> điểm</div>
           </div>
@@ -369,12 +367,12 @@
           <div class="rv-pen-wrap">
             <div class="rv-pen-label">PENALTY</div>
             <div class="rv-pen-grid">
-              <button class="rv-p-btn rv-p-clr" onclick="app.setPenalty(2,0)">CLR</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(2,1)">1</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(2,2)">2</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(2,3)">3</button>
-              <button class="rv-p-btn" onclick="app.setPenalty(2,4)">4</button>
-              <button class="rv-p-btn rv-p-dq" onclick="app.setPenalty(2,'DQ')">DQ</button>
+              <button class="rv-p-btn rv-p-clr" data-pen-lane="2" data-pen-value="0" onclick="app.setPenalty(2,0)">CLR</button>
+              <button class="rv-p-btn" data-pen-lane="2" data-pen-value="1" onclick="app.setPenalty(2,1)">1</button>
+              <button class="rv-p-btn" data-pen-lane="2" data-pen-value="2" onclick="app.setPenalty(2,2)">2</button>
+              <button class="rv-p-btn" data-pen-lane="2" data-pen-value="3" onclick="app.setPenalty(2,3)">3</button>
+              <button class="rv-p-btn" data-pen-lane="2" data-pen-value="4" onclick="app.setPenalty(2,4)">4</button>
+              <button class="rv-p-btn rv-p-dq" data-pen-lane="2" data-pen-value="DQ" onclick="app.setPenalty(2,'DQ')">DQ</button>
             </div>
             <div class="rv-pen-total">Lỗi: <span id="l2-pen">0</span> điểm</div>
           </div>
@@ -474,12 +472,17 @@
               <input type="file" id="csv-file" accept=".csv" onchange="app.processCSV('qualifying')">
             </div>
             <div class="import-box">
-              <div class="import-title">File vòng 1-16</div>
-              <div class="import-desc">Dùng riêng để tạo bracket. Lấy seed theo thứ tự file, không dùng lại file vòng loại.</div>
+              <div class="import-title">File bracket</div>
+              <div class="import-desc">Dùng chung cho bracket. Chọn vòng cần tạo rồi nhập file seed riêng.</div>
+              <select id="bracket-size-select" style="width:100%;margin:8px 0 10px;">
+                <option value="16">Vòng 1-16</option>
+                <option value="8">Vòng 1-8</option>
+                <option value="4">Vòng 1-4</option>
+              </select>
               <input type="file" id="bracket-csv-file" accept=".csv" onchange="app.processCSV('bracket')">
             </div>
           </div>
-          <p style="font-size: 11px; color: var(--text-3); margin-top: 5px;">Định dạng: Tên, Ngày sinh, Tỉnh, SBD. File vòng 1-16 có thể dùng CSV kết quả vòng loại đã sắp hạng.</p>
+          <p style="font-size: 11px; color: var(--text-3); margin-top: 5px;">Định dạng: Tên, Ngày sinh, Đơn vị, SBD. File bracket có thể dùng CSV kết quả vòng loại đã sắp hạng.</p>
           <div id="csv-preview" class="hidden">
             <div
               style="display:flex; justify-content:space-between; align-items:center; margin: 15px 0; gap:8px; flex-wrap:wrap;">
@@ -489,7 +492,10 @@
               <div style="display:flex; gap:8px; flex-wrap:wrap;">
                 <button class="btn-primary" onclick="app.downloadResultsCsv()"
                   style="width:auto; padding: 10px 16px; margin:0; font-size:13px; background:rgba(0,200,150,0.85);">⬇
-                  Tải CSV</button>
+                  TẢI KẾT QUẢ CSV</button>
+                <button class="btn-primary" onclick="app.navigate('bracket'); app.generateBracket();"
+                  style="width:auto; padding: 10px 16px; margin:0; font-size:13px; background:rgba(110,90,240,0.85);">
+                  MỞ BRACKET</button>
                 <button class="btn-primary" onclick="app.clearTournamentData()"
                   style="width:auto; padding: 10px 16px; margin:0; font-size:13px; background:rgba(220,60,60,0.85);">🗑
                   Xóa</button>
@@ -505,32 +511,20 @@
                     <th>SBD</th>
                     <th>Họ và Tên</th>
                     <th>Ngày sinh</th>
-                    <th>Tỉnh</th>
+                    <th>Đơn vị</th>
                     <th>Lần 1</th>
                     <th>Lần 2</th>
                     <th>Tốt nhất</th>
-                    <th>Kết quả</th>
-                    <th>1/16-V1</th>
-                    <th>1/16-V2</th>
-                    <th>1/16-V3</th>
-                    <th>1/16-V4</th>
-                    <th>1/16-V5</th>
-                    <th>1/8-V1</th>
-                    <th>1/8-V2</th>
-                    <th>1/8-V3</th>
-                    <th>1/8-V4</th>
-                    <th>1/8-V5</th>
-                    <th>BK-V1</th>
-                    <th>BK-V2</th>
-                    <th>BK-V3</th>
-                    <th>BK-V4</th>
-                    <th>BK-V5</th>
-                    <th>CK-V1</th>
-                    <th>CK-V2</th>
-                    <th>CK-V3</th>
-                    <th>CK-V4</th>
-                    <th>CK-V5</th>
                   </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="bracket-stats-wrap" class="table-container" style="margin-top:14px;display:none;">
+              <div style="font-size:12px;font-weight:700;color:var(--text-2);margin:0 0 8px;">Thống kê bracket</div>
+              <table id="bracket-stats-table">
+                <thead>
+                  <tr id="bracket-stats-head"></tr>
                 </thead>
                 <tbody></tbody>
               </table>
@@ -689,13 +683,12 @@
             <span class="slave-pick-sub" id="counter-pick-s2-sub">--</span>
           </button>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="counter-grid">
           <!-- SLAVE 1 -->
-          <div class="card" style="text-align:center;padding:14px;">
-            <div style="font-size:11px;letter-spacing:2px;color:#50b0ff;margin-bottom:6px;">SLAVE 1</div>
+          <div class="card counter-card">
+            <div class="counter-label counter-label-s1">SLAVE 1</div>
             <div id="cnt1-status" class="slave-card-status">--</div>
-            <div id="cnt1-big"
-              style="font-family:'JetBrains Mono',monospace;font-size:54px;font-weight:800;color:#a0e0ff;margin:8px 0;">
+            <div id="cnt1-big" class="counter-value counter-value-s1">
               00</div>
             <div class="counter-dir">
               <button id="cnt1-up" class="counter-dir-btn active" onclick="app.counterSetDirection(1, 1)">UP</button>
@@ -708,19 +701,18 @@
               <button onclick="app.adjustNumberInput('cnt1-input', 1)">+</button>
               <button onclick="app.adjustNumberInput('cnt1-input', 10)">+10</button>
             </div>
-            <div style="display:flex;gap:6px;margin-top:8px;">
-              <button class="btn-primary" style="flex:1;background:#40a0e0;padding:8px;font-size:11px;"
+            <div class="counter-actions">
+              <button class="btn-primary counter-set"
                 onclick="app.counterSet(1)">SET</button>
-              <button class="btn-primary" style="flex:1;background:#e04848;padding:8px;font-size:11px;"
+              <button class="btn-primary counter-reset"
                 onclick="app.counterReset(1)">RESET</button>
             </div>
           </div>
           <!-- SLAVE 2 -->
-          <div class="card" style="text-align:center;padding:14px;">
-            <div style="font-size:11px;letter-spacing:2px;color:#ff8050;margin-bottom:6px;">SLAVE 2</div>
+          <div class="card counter-card">
+            <div class="counter-label counter-label-s2">SLAVE 2</div>
             <div id="cnt2-status" class="slave-card-status">--</div>
-            <div id="cnt2-big"
-              style="font-family:'JetBrains Mono',monospace;font-size:54px;font-weight:800;color:#ffa080;margin:8px 0;">
+            <div id="cnt2-big" class="counter-value counter-value-s2">
               00</div>
             <div class="counter-dir">
               <button id="cnt2-up" class="counter-dir-btn active" onclick="app.counterSetDirection(2, 1)">UP</button>
@@ -733,10 +725,10 @@
               <button onclick="app.adjustNumberInput('cnt2-input', 1)">+</button>
               <button onclick="app.adjustNumberInput('cnt2-input', 10)">+10</button>
             </div>
-            <div style="display:flex;gap:6px;margin-top:8px;">
-              <button class="btn-primary" style="flex:1;background:#40a0e0;padding:8px;font-size:11px;"
+            <div class="counter-actions">
+              <button class="btn-primary counter-set"
                 onclick="app.counterSet(2)">SET</button>
-              <button class="btn-primary" style="flex:1;background:#e04848;padding:8px;font-size:11px;"
+              <button class="btn-primary counter-reset"
                 onclick="app.counterReset(2)">RESET</button>
             </div>
           </div>

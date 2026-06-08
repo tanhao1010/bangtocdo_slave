@@ -1,5 +1,8 @@
 (() => {
   let lastRev = 0;
+  let busy = false;
+  let unchangedCount = 0;
+  let pollTimer = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -71,16 +74,41 @@
   }
 
   async function poll() {
+    if (busy) return scheduleNext(2500);
+    busy = true;
     try {
       const res = await fetch(`/api/display?rev=${lastRev}`, { cache: 'no-store' });
-      if (res.status === 304) return;
-      if (!res.ok) return;
+      if (res.status === 304) {
+        unchangedCount++;
+        return;
+      }
+      if (!res.ok) {
+        unchangedCount++;
+        return;
+      }
       render(await res.json());
+      unchangedCount = 0;
     } catch (e) {
       // Keep the last rendered frame on transient WiFi/AP drops.
+      unchangedCount++;
+    } finally {
+      busy = false;
+      scheduleNext();
     }
   }
 
+  function scheduleNext(forcedDelay) {
+    if (pollTimer) clearTimeout(pollTimer);
+    const idleDelay = unchangedCount > 5 ? 3500 : 1800;
+    const delay = document.hidden ? 5000 : (forcedDelay || idleDelay);
+    pollTimer = setTimeout(poll, delay);
+  }
+
   poll();
-  setInterval(poll, 600);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      unchangedCount = 0;
+      poll();
+    }
+  });
 })();
